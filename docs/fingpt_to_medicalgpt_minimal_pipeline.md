@@ -10,23 +10,18 @@
 ## 2. 新增脚本
 - `fin_to_sharegpt.py`：将 FinGPT 风格数据转换为 MedicalGPT SFT 格式（ShareGPT conversations）
 - `fin_to_dpo_pairs.py`：将 FinGPT 风格数据转换为 MedicalGPT DPO 偏好对格式
-- `run_fingpt_medicalgpt_min.py`：最小一键流程（下载 -> 转换 -> SFT -> 合并 LoRA）
+- `run_fingpt_min.ipynb`：最小可跑 Notebook（加载 -> 转换 -> SFT -> 合并 LoRA）
 
 ## 3. 一键最小流程
 ```bash
-python run_fingpt_medicalgpt_min.py
+# 推荐：直接打开并逐个执行 Notebook cells
+# jupyter lab run_fingpt_min.ipynb
+#
+# 或在支持 notebook 的 IDE 中打开：run_fingpt_min.ipynb
 ```
 
-可选环境变量：
-```bash
-BASE_MODEL=TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-FIN_DATASET=FinGPT/fingpt-sentiment-train \
-FIN_SPLIT=train \
-OUT_DIR=data/fingpt_min \
-SFT_OUT=outputs/fingpt_sft_lora \
-MERGED_OUT=outputs/fingpt_sft_merged \
-python run_fingpt_medicalgpt_min.py
-```
+参数修改方式：
+- 直接在 `run_fingpt_min.ipynb` 的「配置参数」cell 里修改 `BASE_MODEL / FIN_DATASET / FIN_SPLIT / OUT_DIR` 等变量
 
 ## 4. 分步执行（更可控）
 
