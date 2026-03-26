@@ -168,12 +168,14 @@ def main():
         return new_examples
 
     # Preprocess the dataset
+    dataset_num_proc = getattr(training_args, "dataset_num_proc", 1) or 1
+
     if is_main_process:
         logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
         tokenized_train_dataset = train_dataset.map(
             preprocess_function,
             batched=True,
-            num_proc=training_args.dataset_num_proc,
+            num_proc=dataset_num_proc,
             remove_columns=train_dataset.column_names,
             load_from_cache_file=False,
             desc="Running tokenizer on dataset" if is_main_process else None,
@@ -188,7 +190,7 @@ def main():
         tokenized_eval_dataset = eval_dataset.map(
             preprocess_function,
             batched=True,
-            num_proc=training_args.dataset_num_proc,
+            num_proc=dataset_num_proc,
             remove_columns=eval_dataset.column_names,
             load_from_cache_file=False,
             desc="Running tokenizer on dataset" if is_main_process else None,
@@ -220,7 +222,7 @@ def main():
         if is_main_process:
             trainer.save_model(training_args.output_dir)
 
-    trainer.generate_completions()
+    # trainer.generate_completions()  # Removed: RLOOTrainer does not have this method
 
 
 if __name__ == "__main__":
