@@ -22,35 +22,49 @@ from typing import Any, Dict, Iterable, List
 
 from datasets import Dataset, load_dataset
 
-QUESTION_KEYS = ["instruction", "question", "query", "prompt", "input", "context", "text"]
+QUESTION_KEYS = ["question", "query", "prompt", "input", "context", "text"]
 ANSWER_KEYS = ["output", "answer", "response", "completion", "label", "sentiment"]
+
+
+def to_text(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float, bool)):
+        return str(v).strip()
+    if isinstance(v, (list, dict)):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v).strip()
 
 
 def pick_first(rec: Dict[str, Any], keys: List[str]) -> str:
     for k in keys:
-        if k in rec and rec[k] is not None:
-            val = str(rec[k]).strip()
+        if k in rec:
+            val = to_text(rec.get(k))
             if val:
                 return val
     return ""
 
 
 def normalize_qa(rec: Dict[str, Any]) -> Dict[str, str]:
-    instruction = str(rec.get("instruction", "")).strip()
-    inp = str(rec.get("input", "")).strip()
+    instruction = to_text(rec.get("instruction"))
+    inp = to_text(rec.get("input"))
     q = pick_first(rec, QUESTION_KEYS)
     a = pick_first(rec, ANSWER_KEYS)
 
     if instruction and inp:
         q = f"{instruction}\n\n{inp}"
+    elif instruction and q and instruction != q:
+        q = f"{instruction}\n\n{q}"
     elif instruction and not q:
         q = instruction
 
     if not q and "conversations" in rec:
         convs = rec.get("conversations") or []
         if len(convs) >= 2:
-            q = str(convs[0].get("value", "")).strip()
-            a = str(convs[1].get("value", "")).strip()
+            q = to_text(convs[0].get("value"))
+            a = to_text(convs[1].get("value"))
 
     return {"question": q.strip(), "answer": a.strip()}
 
