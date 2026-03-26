@@ -51,13 +51,33 @@ def pick_first(rec: Dict[str, Any], keys: List[str]) -> str:
     return ""
 
 
-def parse_options(text: str) -> List[str]:
-    m = re.search(r"(?i)options?\s*[:：]\s*(.+)", text)
-    if not m:
-        return []
-    raw = m.group(1)
+def _split_options(raw: str) -> List[str]:
     cands = re.split(r"[,/|;；、]", raw)
     return [c.strip() for c in cands if c.strip()]
+
+
+def parse_options(text: str) -> List[str]:
+    # Pattern 1: "Options: a, b, c"
+    m = re.search(r"(?i)options?\s*[:：]\s*(.+)", text)
+    if m:
+        options = _split_options(m.group(1))
+        if options:
+            return options
+
+    # Pattern 2: "... from {negative/neutral/positive}"
+    b = re.search(r"\{([^{}]+)\}", text)
+    if b:
+        options = _split_options(b.group(1))
+        if options:
+            return options
+
+    # Pattern 3: "... from [negative, neutral, positive]"
+    s = re.search(r"\[([^\[\]]+)\]", text)
+    if s:
+        options = _split_options(s.group(1))
+        if options:
+            return options
+    return []
 
 
 def make_question(rec: Dict[str, Any]) -> str:
@@ -73,15 +93,23 @@ def make_question(rec: Dict[str, Any]) -> str:
     return q
 
 
+def choose_rejected(chosen: str, candidates: List[str]) -> str:
+    if not candidates:
+        return ""
+    chosen_norm = chosen.strip().lower()
+    pool = [c for c in candidates if c.strip().lower() != chosen_norm]
+    if not pool:
+        return ""
+    return random.choice(pool)
+
+
 def make_rejected_from_sentiment(chosen: str) -> str:
-    c = chosen.lower().strip()
-    for cand in SENTIMENT_CANDIDATES:
-        if cand != c:
-            return cand
-    if chosen.strip() in CN_SENTIMENT_CANDIDATES:
-        for cand in CN_SENTIMENT_CANDIDATES:
-            if cand != chosen.strip():
-                return cand
+    rejected = choose_rejected(chosen, SENTIMENT_CANDIDATES)
+    if rejected:
+        return rejected
+    rejected = choose_rejected(chosen, CN_SENTIMENT_CANDIDATES)
+    if rejected:
+        return rejected
     return ""
 
 
@@ -99,11 +127,7 @@ def make_pair(rec: Dict[str, Any]) -> Tuple[str, str, str]:
 
     options = parse_options(q)
     if options:
-        lower_chosen = chosen.lower()
-        for opt in options:
-            if opt.lower() != lower_chosen:
-                rejected = opt
-                break
+        rejected = choose_rejected(chosen, options)
 
     if not rejected:
         rejected = make_rejected_from_sentiment(chosen)
