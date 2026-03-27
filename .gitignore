@@ -66,6 +66,7 @@ anaconda3/
 *.sh
 
 # Model outputs and checkpoints
+outputs/
 outputs-pt-v1/
 outputs-sft-v1/
 outputs-rm-v1/
@@ -75,8 +76,8 @@ merged-sft/
 merged-rm/
 
 # Data and datasets
-data/
-role_play_data/
+# data/
+# role_play_data/
 
 # Logs
 *.log
