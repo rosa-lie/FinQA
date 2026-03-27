@@ -13,7 +13,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument('--source_file', required=True, type=str)
     parser.add_argument('--output_file', required=True, type=str)
-    parser.add_argument('--stats_file', default=None, type=str)
     parser.add_argument('--min_turns', default=2, type=int)
     parser.add_argument('--max_turns', default=20, type=int)
     parser.add_argument('--max_total_chars', default=4000, type=int)
@@ -49,7 +48,7 @@ def main() -> None:
     kept_char_samples: List[int] = []
 
     with src.open('r', encoding='utf-8') as rf, dst.open('w', encoding='utf-8') as wf:
-        for _, line in enumerate(rf, 1):
+        for line in rf:
             line = line.strip()
             if not line:
                 stats['skip_blank_line'] += 1
@@ -71,17 +70,17 @@ def main() -> None:
             for idx, turn in enumerate(conv):
                 normalized = normalize_turn(turn)
                 if normalized is None:
-                    bad_turn = True
                     stats['drop_invalid_turn'] += 1
+                    bad_turn = True
                     break
                 expected_role = 'human' if idx % 2 == 0 else 'gpt'
                 if normalized['from'] != expected_role:
-                    bad_turn = True
                     stats['drop_role_order'] += 1
+                    bad_turn = True
                     break
                 if len(normalized['value']) > args.max_single_value_chars:
-                    bad_turn = True
                     stats['drop_overlong_turn'] += 1
+                    bad_turn = True
                     break
                 cleaned.append(normalized)
             if bad_turn:
@@ -131,10 +130,6 @@ def main() -> None:
         }
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    if args.stats_file:
-        stats_path = Path(args.stats_file)
-        stats_path.parent.mkdir(parents=True, exist_ok=True)
-        stats_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
 if __name__ == '__main__':
