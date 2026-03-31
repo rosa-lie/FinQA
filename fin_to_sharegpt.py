@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from datasets import Dataset, load_dataset
-
-QUESTION_KEYS = ["question", "query", "prompt", "input", "context", "text"]
-ANSWER_KEYS = ["output", "answer", "response", "completion", "label", "sentiment"]
+# schema 对齐（字段对齐）
+QUESTION_KEYS = ["question", "query", "prompt", "input", "context", "text"] # 问题字段可能叫
+ANSWER_KEYS = ["output", "answer", "response", "completion", "label", "sentiment"] # 回答字段可能叫
 
 
 def to_text(v: Any) -> str:
