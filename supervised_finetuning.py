@@ -18,6 +18,7 @@ Fine-tuning the library models for causal language modeling (GPT, LLaMA, Bloom, 
 part of code is modified from https://github.com/shibing624/textgen
 """
 
+import json
 import math
 import os
 import sys
@@ -28,7 +29,7 @@ from typing import Literal, Optional, Tuple
 
 import torch
 import torch.utils.data
-from datasets import load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from loguru import logger
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel, prepare_model_for_kbit_training
 from transformers import (
@@ -322,6 +323,57 @@ def check_and_optimize_memory():
         logger.info("✅ 启用内存高效注意力机制")
 
 
+def _iter_local_records(file_path: str):
+    """Yield JSON records from a local json/jsonl file."""
+    if file_path.endswith(".jsonl"):
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+        return
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if isinstance(payload, list):
+        for item in payload:
+            yield item
+    else:
+        yield payload
+
+
+def _normalize_local_record(record: dict) -> dict:
+    """
+    Keep training-relevant fields while making auxiliary metadata schema-safe.
+    Some mixed datasets store `metadata.gold_ind` and `metadata.gold_inds` with
+    incompatible nested shapes, which breaks `load_dataset('json', ...)`.
+    """
+    normalized = dict(record)
+    metadata = normalized.get("metadata")
+    if isinstance(metadata, dict):
+        metadata = dict(metadata)
+        for key in ("gold_ind", "gold_inds"):
+            if key in metadata and not isinstance(metadata[key], str):
+                metadata[key] = json.dumps(metadata[key], ensure_ascii=False, sort_keys=True)
+        normalized["metadata"] = metadata
+    return normalized
+
+
+def load_local_dataset(data_files: dict) -> DatasetDict:
+    """Load local json/jsonl files without strict schema casting across files."""
+    dataset_dict = {}
+    for split, file_paths in data_files.items():
+        records = []
+        for file_path in sorted(file_paths):
+            logger.info(f"Loading {split} file: {file_path}")
+            for record in _iter_local_records(file_path):
+                records.append(_normalize_local_record(record))
+        if not records:
+            raise ValueError(f"No records were loaded for split: {split}")
+        dataset_dict[split] = Dataset.from_list(records)
+    return DatasetDict(dataset_dict)
+
+
 def main():
     parser = HfArgumentParser((ModelArguments, DataArguments, Seq2SeqTrainingArguments, ScriptArguments))
 
@@ -337,6 +389,11 @@ def main():
     # 确保 DeepSpeed 配置正确加载
     if training_args.deepspeed is not None:
         training_args.distributed_state.deepspeed_plugin = None
+
+    # transformers>=5 的 TensorBoardCallback 优先读取环境变量 TENSORBOARD_LOGGING_DIR。
+    # 为了兼容旧参数习惯，这里将 --logging_dir 同步到环境变量。
+    if getattr(training_args, "logging_dir", None):
+        os.environ["TENSORBOARD_LOGGING_DIR"] = os.path.abspath(training_args.logging_dir)
 
     # The Trainer will handle distributed training setup
     is_main_process = training_args.local_rank in [-1, 0]
@@ -415,11 +472,7 @@ def main():
                 f'{data_args.validation_file_dir}/**/*.jsonl', recursive=True)
             logger.info(f"eval files: {eval_data_files}")
             data_files["validation"] = eval_data_files
-        raw_datasets = load_dataset(
-            'json',
-            data_files=data_files,
-            cache_dir=model_args.cache_dir,
-        )
+        raw_datasets = load_local_dataset(data_files)
         # If no validation data is there, validation_split_percentage will be used to divide the dataset.
         if "validation" not in raw_datasets.keys():
             shuffled_train_dataset = raw_datasets["train"].shuffle(seed=42)

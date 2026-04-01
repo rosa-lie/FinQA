@@ -130,7 +130,7 @@ def main():
     parser.add_argument("--repetition_penalty", type=float, default=1.0)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument('--data_file', default=None, type=str,
-                        help="A file that contains instructions (one instruction per line)")
+                        help="A file that contains prompts/questions (one per line)")
     parser.add_argument('--interactive', action='store_true', help="Run in interactive mode (default multi-turn)")
     parser.add_argument('--single_tune', action='store_true', help='Whether to use single-turn model')
     parser.add_argument('--temperature', type=float, default=0.7)
@@ -182,7 +182,7 @@ def main():
     print(tokenizer)
     # Test data
     if args.data_file is None:
-        examples = ["介绍下北京", "乙肝和丙肝的区别？"]
+        examples = ["请解释净利润率（Net Profit Margin）的含义，并给一个简单例子。", "某公司2023年营收100亿元、净利润8亿元，净利率是多少？"]
     else:
         with open(args.data_file, 'r') as f:
             examples = [l.strip() for l in f.readlines()]

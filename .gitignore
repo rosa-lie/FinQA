@@ -78,8 +78,8 @@ merged-sft/
 merged-rm/
 
 # Data and datasets
-data/
-role_play_data/
+# data/
+# role_play_data/
 
 # Logs
 *.log
