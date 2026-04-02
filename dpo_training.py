@@ -340,7 +340,7 @@ def main():
 
     eval_dataset = None
     max_eval_samples = 0
-    if args.do_eval:
+    if args.do_eval and eval_dataset is not None and len(eval_dataset) > 0:
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = raw_datasets["validation"]
@@ -362,11 +362,15 @@ def main():
                       and 0 < len(x['prompt'] + x['rejected']) <= full_max_length
         )
         logger.debug(f"Num eval_samples: {len(eval_dataset)}")
-        logger.debug("First eval example:")
-        first_example = eval_dataset[0]
-        logger.debug(f"prompt:\n{first_example['prompt']}")
-        logger.debug(f"chosen:\n{first_example['chosen']}")
-        logger.debug(f"rejected:\n{first_example['rejected']}")
+        if len(eval_dataset) > 0:
+            logger.debug("First eval example:")
+            first_example = eval_dataset[0]
+            logger.debug(f"prompt:\n{first_example['prompt']}")
+            logger.debug(f"chosen:\n{first_example['chosen']}")
+            logger.debug(f"rejected:\n{first_example['rejected']}")
+        else:
+            logger.warning("Eval dataset is empty after preprocessing/filtering.")
+
 
     # Load model
     torch_dtype = (
@@ -407,8 +411,13 @@ def main():
         ) if args.qlora else None,
     )
     # fixed FP16 ValueError
-    for param in filter(lambda p: p.requires_grad, model.parameters()):
-        param.data = param.data.to(torch.float32)
+    # IMPORTANT: when using LoRA(PEFT), upcasting all trainable params here would
+    # upcast the full base model before adapters are attached and can easily OOM.
+    if args.use_peft:
+        logger.info("Skip pre-PEFT full-model fp32 upcast to avoid OOM.")
+    else:
+        for param in filter(lambda p: p.requires_grad, model.parameters()):
+            param.data = param.data.to(torch.float32)
 
     # Initialize our Trainer
     if args.gradient_checkpointing:
@@ -416,6 +425,18 @@ def main():
         model.config.use_cache = False
     else:
         model.config.use_cache = True
+
+    effective_eval_strategy = args.eval_strategy
+    # Trainer validation depends on (eval_strategy, eval_dataset), not only do_eval.
+    # Force a safe fallback whenever eval dataset is unavailable/empty.
+    if eval_dataset is None or len(eval_dataset) == 0:
+        if effective_eval_strategy != "no":
+            logger.warning(
+                "eval_dataset is unavailable or empty after filtering. "
+                "Auto fallback: set eval_strategy='no' and skip evaluation."
+            )
+        args.do_eval = False
+        effective_eval_strategy = "no"
 
     training_args = DPOConfig(
         max_length=full_max_length,
@@ -427,7 +448,7 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         gradient_checkpointing=args.gradient_checkpointing,
         learning_rate=args.learning_rate,
-        eval_strategy=args.eval_strategy,
+        eval_strategy=effective_eval_strategy,
         eval_steps=args.eval_steps,
         output_dir=args.output_dir,
         report_to=args.report_to,
@@ -463,7 +484,7 @@ def main():
         ref_model=None if args.use_peft else deepcopy(model),
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        eval_dataset=eval_dataset if effective_eval_strategy != "no" else None,
         processing_class=tokenizer,
         peft_config=peft_config if args.use_peft else None,
     )
@@ -487,7 +508,7 @@ def main():
             trainer.model.save_pretrained(args.output_dir)
 
     # Evaluation
-    if args.do_eval:
+    if args.do_eval and eval_dataset is not None and len(eval_dataset) > 0:
         if trainer.is_world_process_zero():
             logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()

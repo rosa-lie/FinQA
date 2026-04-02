@@ -8,8 +8,81 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from .common import DATASET_FAMILIES, infer_dataset_family, iter_records, load_source, parse_bool_arg
+from .common import DATASET_FAMILIES, infer_dataset_family, iter_records, load_source, parse_bool_arg, to_text
 from .families import FAMILY_MODULES
+
+
+DPO_STRUCTURED_ANCHORS = ["最终答案：", "结论：", "推理程序：", "推理：", "解释："]
+
+
+def _check_dpo_row(row: Dict[str, Any]) -> str | None:
+    required_fields = ["system", "history", "question", "response_chosen", "response_rejected", "source_dataset", "record_id", "metadata"]
+    for field in required_fields:
+        if field not in row:
+            return "missing_required_field"
+
+    if not isinstance(row.get("history"), list):
+        return "invalid_history_type"
+    if not isinstance(row.get("metadata"), dict):
+        return "invalid_metadata_type"
+
+    question = to_text(row.get("question"))
+    chosen = to_text(row.get("response_chosen"))
+    rejected = to_text(row.get("response_rejected"))
+
+    if not question:
+        return "empty_question"
+    if not chosen:
+        return "empty_chosen"
+    if not rejected:
+        return "empty_rejected"
+
+    if chosen == rejected:
+        return "identical_pair"
+
+    # comparable but lower-quality: reject responses that are too short to compare.
+    min_rejected_chars = max(24, int(len(chosen) * 0.2))
+    if len(rejected) < min_rejected_chars:
+        return "rejected_too_short"
+
+    # If chosen uses a structured answer style, rejected should share at least one anchor.
+    chosen_anchors = [anchor for anchor in DPO_STRUCTURED_ANCHORS if anchor in chosen]
+    if chosen_anchors and not any(anchor in rejected for anchor in chosen_anchors):
+        return "not_comparable"
+
+    return None
+
+
+def _postprocess_dpo_rows(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    kept_rows: List[Dict[str, Any]] = []
+    seen_keys = set()
+    reject_counts: Dict[str, int] = defaultdict(int)
+
+    for row in rows:
+        reason = _check_dpo_row(row)
+        if reason is not None:
+            reject_counts[reason] += 1
+            continue
+
+        dedupe_key = (
+            to_text(row.get("question")),
+            to_text(row.get("response_chosen")),
+            to_text(row.get("response_rejected")),
+        )
+        if dedupe_key in seen_keys:
+            reject_counts["duplicate_pair"] += 1
+            continue
+        seen_keys.add(dedupe_key)
+        kept_rows.append(row)
+
+    stats: Dict[str, int] = {
+        "post_filter_input_rows": len(rows),
+        "post_filter_saved_rows": len(kept_rows),
+        "post_filter_skipped_rows": sum(reject_counts.values()),
+    }
+    for reason, count in sorted(reject_counts.items()):
+        stats[f"post_filter_{reason}_rows"] = count
+    return kept_rows, stats
 
 
 def _process_family_records(records: List[Dict[str, Any]], family: str, task: str, args: Any) -> Tuple[List[Dict[str, Any]], int, Dict[str, int]]:
@@ -22,18 +95,28 @@ def _process_family_records(records: List[Dict[str, Any]], family: str, task: st
 
     builder = module.build_sft_item if task == "sft" else module.build_dpo_item
     rows: List[Dict[str, Any]] = []
-    skipped = 0
+    build_skipped = 0
     for rec in records:
         item = builder(rec, args)
         if item is None:
-            skipped += 1
+            build_skipped += 1
             continue
         rows.append(item)
+
+    post_filter_skipped = 0
+    if task == "dpo":
+        rows, post_filter_stats = _postprocess_dpo_rows(rows)
+        family_stats.update(post_filter_stats)
+        post_filter_skipped = post_filter_stats.get("post_filter_skipped_rows", 0)
 
     family_stats.setdefault("group_count", len(records) if family == "convfinqa_turn" else 0)
     family_stats.setdefault("dedup_dropped_rows", 0)
     family_stats.setdefault("fallback_selected_rows", 0)
-    return rows, skipped, family_stats
+    family_stats["build_skipped_rows"] = build_skipped
+    family_stats["post_filter_skipped_rows"] = post_filter_skipped
+
+    skipped_total = build_skipped + post_filter_skipped
+    return rows, skipped_total, family_stats
 
 
 def run_pipeline(task: str, args: Any) -> Dict[str, Any]:
@@ -87,6 +170,14 @@ def run_pipeline(task: str, args: Any) -> Dict[str, Any]:
         summary["group_count"] = conv_stats.get("group_count", 0)
         summary["dedup_dropped_rows"] = conv_stats.get("dedup_dropped_rows", 0)
         summary["fallback_selected_rows"] = conv_stats.get("fallback_selected_rows", 0)
+
+    if task == "dpo":
+        dpo_post_filter_totals: Dict[str, int] = defaultdict(int)
+        for family_stats in family_outputs.values():
+            for key, value in family_stats.items():
+                if key.startswith("post_filter_") and isinstance(value, int):
+                    dpo_post_filter_totals[key] += value
+        summary["dpo_post_filter"] = dict(sorted(dpo_post_filter_totals.items()))
 
     return summary
 

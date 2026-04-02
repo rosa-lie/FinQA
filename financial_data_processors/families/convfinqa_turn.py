@@ -164,8 +164,9 @@ def _mutate_numeric_answer(text: str) -> str:
             token = match.group(0).replace(",", "")
             try:
                 value = float(token)
-                mutated = value + 1 if value >= 0 else value - 1
-                replacement = str(int(mutated)) if mutated.is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
+                step = max(abs(value) * 0.12, 1.0)
+                mutated = value + step if value >= 0 else value - step
+                replacement = str(int(mutated)) if float(mutated).is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
             except Exception:
                 replacement = token + "1"
             new_answer = answer_text[:match.start()] + replacement + answer_text[match.end():]
@@ -179,20 +180,92 @@ def _mutate_numeric_answer(text: str) -> str:
     token = match.group(0).replace(",", "")
     try:
         value = float(token)
-        mutated = value + 1 if value >= 0 else value - 1
-        replacement = str(int(mutated)) if mutated.is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
+        step = max(abs(value) * 0.12, 1.0)
+        mutated = value + step if value >= 0 else value - step
+        replacement = str(int(mutated)) if float(mutated).is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
     except Exception:
         replacement = token + "1"
     return text[:match.start()] + replacement + text[match.end():]
 
 
-def _remove_program_section(text: str) -> str:
-    lines = []
-    for line in text.splitlines():
+def _mutate_program_expr(program: str) -> str:
+    p = program
+    substitutions = [
+        ("divide", "multiply"),
+        ("subtract", "add"),
+        ("减去", "加上"),
+        ("同比", "环比"),
+    ]
+    for src, dst in substitutions:
+        if src in p:
+            p = p.replace(src, dst, 1)
+            break
+
+    fn_call = re.search(r"([A-Za-z_]+)\(([^,()]+),\s*([^)]+)\)", p)
+    if fn_call and fn_call.group(1).lower() in {"subtract", "divide", "add", "multiply"}:
+        fn, a, b = fn_call.group(1), fn_call.group(2).strip(), fn_call.group(3).strip()
+        p = p[:fn_call.start()] + f"{fn}({b}, {a})" + p[fn_call.end():]
+
+    if p == program:
+        p = program + "；并忽略上轮筛选条件后再计算。"
+    return p
+
+
+def _mutate_program_section(text: str) -> str:
+    lines = text.splitlines()
+    out = []
+    changed = False
+    for line in lines:
         if line.startswith("推理程序："):
-            continue
-        lines.append(line)
-    return "\n".join(lines).strip()
+            prog = line[len("推理程序："):].strip()
+            out.append("推理程序：" + _mutate_program_expr(prog))
+            changed = True
+        else:
+            out.append(line)
+    if not changed:
+        out.append("推理程序：忽略上轮筛选条件，按当前轮近似口径计算。")
+    return "\n".join(out)
+
+
+def _mutate_evidence_section(text: str) -> str:
+    lines = text.splitlines()
+    try:
+        start = lines.index("关键证据：")
+    except ValueError:
+        return text
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("推理程序：") or lines[i].startswith("最终答案："):
+            end = i
+            break
+
+    mutated_evidence = ["- 误把上一轮无关指标和相邻年份数据作为证据。"]
+    return "\n".join(lines[: start + 1] + mutated_evidence + lines[end:])
+
+
+def _mutate_dialog_state(text: str) -> str:
+    lines = []
+    changed = False
+    for line in text.splitlines():
+        if line.startswith("问题分析："):
+            lines.append("问题分析：将当前问题按独立问题处理，未继承历史轮次限制条件。")
+            changed = True
+        else:
+            lines.append(line)
+    if not changed:
+        lines.insert(0, "问题分析：按独立问题处理，未继承历史轮次限制条件。")
+    return "\n".join(lines)
+
+
+def _build_high_confusion_rejected(chosen: str) -> str:
+    rejected = chosen
+    # conversational hard-negative: dialogue-state + grounding + program + numeric perturbation
+    rejected = _mutate_dialog_state(rejected)
+    rejected = _mutate_evidence_section(rejected)
+    rejected = _mutate_program_section(rejected)
+    rejected = _mutate_numeric_answer(rejected)
+    return rejected
 
 
 def build_dpo_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
@@ -201,9 +274,7 @@ def build_dpo_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
         return None
 
     chosen = item["conversations"][1]["value"]
-    rejected = _mutate_numeric_answer(_remove_program_section(chosen))
-    if "推理程序：" not in rejected:
-        rejected += "\n推理程序：未给出。"
+    rejected = _build_high_confusion_rejected(chosen)
 
     return {
         "system": "",
