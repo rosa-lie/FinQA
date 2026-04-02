@@ -1,0 +1,607 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""Benchmark base, SFT1, and SFT2 models on financial reasoning tasks."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import gc
+import json
+import math
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+import torch
+from datasets import load_dataset
+from peft import PeftModel
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, GenerationConfig
+
+
+OPTION_RE = re.compile(r"\b([A-F])\b", re.IGNORECASE)
+FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
+
+
+@dataclass
+class BenchmarkExample:
+    task_name: str
+    prompt: str
+    gold_answer: str
+    answer_type: str
+    record_id: str
+    metadata: Dict[str, Any]
+    gold_program: str = ""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate financial reasoning benchmarks.")
+    parser.add_argument("--tokenizer_path", type=str, default=None)
+    parser.add_argument(
+        "--model_entry",
+        action="append",
+        default=[],
+        help="Model spec in name=path format. Repeat to compare multiple models.",
+    )
+    parser.add_argument(
+        "--adapter_entry",
+        action="append",
+        default=[],
+        help="Optional PEFT adapter spec in name=path format. The name must match --model_entry.",
+    )
+    parser.add_argument("--system_prompt", type=str, default="")
+    parser.add_argument("--max_new_tokens", type=int, default=256)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--load_in_8bit", action="store_true")
+    parser.add_argument("--load_in_4bit", action="store_true")
+    parser.add_argument("--convfinqa_test_file", type=str, default="")
+    parser.add_argument("--convfinqa_max_samples", type=int, default=0)
+    parser.add_argument("--fineval_dataset_name", type=str, default="FinGPT/fingpt-fineval")
+    parser.add_argument("--fineval_split", type=str, default="test")
+    parser.add_argument("--fineval_local_file", type=str, default="")
+    parser.add_argument("--fineval_max_samples", type=int, default=0)
+    parser.add_argument(
+        "--cflue_task_file",
+        action="append",
+        default=[],
+        help="CFLUE task spec in task_name=/path/to/file.{json,jsonl} format. Repeat for multiple tasks.",
+    )
+    parser.add_argument("--cflue_max_samples_per_task", type=int, default=0)
+    parser.add_argument("--numeric_abs_tol", type=float, default=1e-4)
+    parser.add_argument("--numeric_rel_tol", type=float, default=1e-4)
+    parser.add_argument("--output_dir", type=str, required=True)
+    return parser.parse_args()
+
+
+def parse_name_path_entries(entries: Sequence[str]) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise ValueError(f"Invalid name=path entry: {entry}")
+        name, path = entry.split("=", 1)
+        name = name.strip()
+        path = path.strip()
+        if not name or not path:
+            raise ValueError(f"Invalid name=path entry: {entry}")
+        parsed[name] = path
+    return parsed
+
+
+def to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value).strip()
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def truncate_text(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def normalize_text_blocks(value: Any, max_items: int, max_chars: int) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+    output = []
+    for item in items[:max_items]:
+        text = to_text(item)
+        if text:
+            output.append(truncate_text(text, max_chars))
+    return output
+
+
+def format_table(table: Any, max_rows: int = 30, max_cols: int = 12, max_cell_chars: int = 100) -> str:
+    if not isinstance(table, list) or not table:
+        return ""
+    lines = []
+    for row in table[:max_rows]:
+        if isinstance(row, list):
+            cells = [truncate_text(to_text(cell), max_cell_chars) for cell in row[:max_cols]]
+            lines.append(" | ".join(cells))
+        else:
+            lines.append(truncate_text(to_text(row), max_cell_chars))
+    return "\n".join(lines)
+
+
+def build_context_sections(record: Dict[str, Any], args: SimpleNamespace) -> List[str]:
+    sections = []
+    pre_text = normalize_text_blocks(record.get("pre_text"), args.max_context_items, args.max_context_chars)
+    post_text = normalize_text_blocks(record.get("post_text"), args.max_context_items, args.max_context_chars)
+    if pre_text:
+        sections.append("材料（表格前文本）：\n" + "\n".join(f"- {item}" for item in pre_text))
+    table_text = format_table(record.get("table") or record.get("table_ori"))
+    if table_text:
+        sections.append("表格：\n" + table_text)
+    if post_text:
+        sections.append("材料（表格后文本）：\n" + "\n".join(f"- {item}" for item in post_text))
+    return sections
+
+
+PROMPT_ARGS = SimpleNamespace(
+    max_context_items=8,
+    max_context_chars=500,
+    max_history_turns=8,
+    max_supporting_facts=8,
+)
+
+
+def load_json_records(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing file: {path}")
+    if path.suffix == ".jsonl":
+        records = []
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        return records
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ["data", "records", "examples", "items"]:
+            if isinstance(data.get(key), list):
+                return data[key]
+    raise ValueError(f"Unsupported file format for {path}")
+
+
+def limit_records(records: List[Dict[str, Any]], max_samples: int) -> List[Dict[str, Any]]:
+    if max_samples and max_samples > 0:
+        return records[:max_samples]
+    return records
+
+
+def build_convfinqa_prompt(record: Dict[str, Any]) -> BenchmarkExample:
+    qa = record.get("qa") if isinstance(record.get("qa"), dict) else {}
+    annotation = record.get("annotation") if isinstance(record.get("annotation"), dict) else {}
+    history = record.get("cur_dial") if isinstance(record.get("cur_dial"), list) else []
+    if not history:
+        history = annotation.get("cur_dial") if isinstance(annotation.get("cur_dial"), list) else []
+
+    question = to_text(qa.get("question") or (history[-1] if history else None))
+    previous_turns = [to_text(item) for item in history[:-1] if to_text(item)]
+    gold_answer = to_text(qa.get("answer") or qa.get("exe_ans") or record.get("exe_ans") or record.get("answer"))
+    gold_program = to_text(
+        record.get("cur_program")
+        or qa.get("program_re")
+        or qa.get("program")
+        or annotation.get("cur_program")
+        or record.get("program")
+    )
+    prompt_parts = [
+        "你是一名金融数值推理助手。请结合历史对话、文本材料和表格，进行分步推理并给出最终答案。",
+    ]
+    if previous_turns:
+        prompt_parts.append("历史对话：\n" + "\n".join(f"- {item}" for item in previous_turns[-PROMPT_ARGS.max_history_turns:]))
+    prompt_parts.extend(build_context_sections(record, PROMPT_ARGS))
+    prompt_parts.append(f"当前问题：{question}")
+    prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
+    return BenchmarkExample(
+        task_name="convfinqa_test",
+        prompt="\n\n".join(prompt_parts),
+        gold_answer=gold_answer,
+        answer_type="numeric",
+        record_id=to_text(record.get("id") or qa.get("id") or record.get("filename")),
+        metadata={"turn_ind": record.get("turn_ind", annotation.get("turn_ind"))},
+        gold_program=gold_program,
+    )
+
+
+def combine_instruction_input(record: Dict[str, Any]) -> str:
+    parts = [
+        to_text(record.get("instruction")),
+        to_text(record.get("input")),
+        to_text(record.get("question") or record.get("query") or record.get("prompt")),
+    ]
+    return "\n\n".join([part for part in parts if part])
+
+
+def render_options(options: Any) -> str:
+    if not options:
+        return ""
+    if isinstance(options, dict):
+        return "\n".join(f"{key}. {to_text(value)}" for key, value in options.items())
+    if isinstance(options, list):
+        rendered = []
+        for idx, option in enumerate(options):
+            if isinstance(option, dict):
+                key = to_text(option.get("label") or option.get("key") or option.get("id") or chr(ord("A") + idx))
+                text = to_text(option.get("text") or option.get("value") or option.get("content") or option)
+                rendered.append(f"{key}. {text}")
+            else:
+                rendered.append(f"{chr(ord('A') + idx)}. {to_text(option)}")
+        return "\n".join(rendered)
+    return to_text(options)
+
+
+def extract_option(text: str) -> str:
+    final_section = extract_section(text, FINAL_ANSWER_RE)
+    for candidate in [final_section, text]:
+        if not candidate:
+            continue
+        match = OPTION_RE.search(candidate.upper())
+        if match:
+            return match.group(1).upper()
+    return ""
+
+
+def infer_gold_option(record: Dict[str, Any]) -> str:
+    candidates = [
+        record.get("gold_option"),
+        record.get("correct_option"),
+        record.get("label"),
+        record.get("answer"),
+        record.get("output"),
+        record.get("response"),
+        record.get("gold_answer"),
+    ]
+    for candidate in candidates:
+        text = to_text(candidate)
+        option = extract_option(text)
+        if option:
+            return option
+    return ""
+
+
+def build_mcq_example(record: Dict[str, Any], task_name: str, source_name: str) -> BenchmarkExample:
+    question = combine_instruction_input(record)
+    option_text = render_options(record.get("options") or record.get("choices") or record.get("candidates"))
+    if option_text:
+        question = f"{question}\n\n选项：\n{option_text}"
+    prompt = (
+        "你是一名金融问答助手。请先做简短推理，再给出最终答案选项。\n\n"
+        f"题目：{question}\n\n"
+        "请按以下结构作答：\n题目理解：...\n推理：...\n最终答案：..."
+    )
+    gold_option = infer_gold_option(record)
+    gold_answer = gold_option or to_text(
+        record.get("answer") or record.get("output") or record.get("response") or record.get("gold_answer")
+    )
+    return BenchmarkExample(
+        task_name=task_name,
+        prompt=prompt,
+        gold_answer=gold_answer,
+        answer_type="mcq",
+        record_id=to_text(record.get("id") or record.get("record_id") or record.get("question_id")),
+        metadata={"source_dataset": source_name},
+    )
+
+
+def load_convfinqa_examples(test_file: str, max_samples: int) -> List[BenchmarkExample]:
+    if not test_file:
+        return []
+    records = limit_records(load_json_records(Path(test_file)), max_samples)
+    return [build_convfinqa_prompt(record) for record in records]
+
+
+def load_fineval_examples(dataset_name: str, split: str, local_file: str, max_samples: int) -> List[BenchmarkExample]:
+    if local_file:
+        records = load_json_records(Path(local_file))
+    else:
+        records = [dict(row) for row in load_dataset(dataset_name, split=split)]
+    records = limit_records(records, max_samples)
+    return [build_mcq_example(record, "fineval_test", "FinGPT/fingpt-fineval") for record in records]
+
+
+def load_cflue_examples(task_files: Dict[str, str], max_samples_per_task: int) -> List[BenchmarkExample]:
+    examples: List[BenchmarkExample] = []
+    for task_name, file_path in task_files.items():
+        path = Path(file_path)
+        if not path.exists():
+            print(f"[skip] Missing CFLUE task file: {path}")
+            continue
+        records = limit_records(load_json_records(path), max_samples_per_task)
+        examples.extend(build_mcq_example(record, f"cflue_{task_name}", f"CFLUE/{task_name}") for record in records)
+    return examples
+
+
+def safe_apply_chat_template(tokenizer: AutoTokenizer, messages: List[Dict[str, str]]) -> str:
+    if hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return messages[-1]["content"]
+
+
+def load_model_and_tokenizer(
+    model_path: str,
+    tokenizer_path: str,
+    adapter_path: str,
+    args: argparse.Namespace,
+):
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, padding_side="left")
+    load_dtype = torch.float16
+    config_kwargs: Dict[str, Any] = {
+        "trust_remote_code": True,
+        "device_map": "auto",
+        "low_cpu_mem_usage": True,
+    }
+    if args.load_in_8bit:
+        config_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    elif args.load_in_4bit:
+        config_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=load_dtype,
+        )
+    else:
+        config_kwargs["torch_dtype"] = load_dtype
+
+    model = AutoModelForCausalLM.from_pretrained(model_path, **config_kwargs)
+    try:
+        model.generation_config = GenerationConfig.from_pretrained(model_path, trust_remote_code=True)
+    except OSError:
+        pass
+    if adapter_path:
+        model = PeftModel.from_pretrained(model, adapter_path, torch_dtype=load_dtype, device_map="auto")
+    model.eval()
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return model, tokenizer
+
+
+@torch.inference_mode()
+def generate_response(model, tokenizer, prompt: str, args: argparse.Namespace) -> str:
+    messages = []
+    if args.system_prompt:
+        messages.append({"role": "system", "content": args.system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    prompt_text = safe_apply_chat_template(tokenizer, messages)
+    inputs = tokenizer(prompt_text, return_tensors="pt")
+    input_ids = inputs["input_ids"].to(model.device)
+    attention_mask = inputs["attention_mask"].to(model.device)
+    outputs = model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        do_sample=args.temperature > 0.0,
+        repetition_penalty=args.repetition_penalty,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    generated_tokens = outputs[0][input_ids.shape[1]:]
+    return tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+
+
+def extract_section(text: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(text or "")
+    if not match:
+        return ""
+    return match.group(1).strip().split("\n")[0].strip()
+
+
+def normalize_program(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").lower())
+
+
+def parse_number(text: str) -> Optional[float]:
+    if not text:
+        return None
+    final_section = extract_section(text, FINAL_ANSWER_RE) or text
+    matches = NUMBER_RE.findall(final_section.replace("，", ","))
+    if not matches:
+        return None
+    value = matches[-1].replace(",", "")
+    is_percent = value.endswith("%")
+    if is_percent:
+        value = value[:-1]
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    if is_percent:
+        return number / 100.0
+    return number
+
+
+def normalize_answer_text(text: str) -> str:
+    text = extract_section(text, FINAL_ANSWER_RE) or text
+    return re.sub(r"\s+", "", text).strip().lower()
+
+
+def score_example(example: BenchmarkExample, prediction: str, args: argparse.Namespace) -> Dict[str, Any]:
+    result = {
+        "task_name": example.task_name,
+        "record_id": example.record_id,
+        "gold_answer": example.gold_answer,
+        "prediction": prediction,
+        "answer_correct": 0.0,
+        "program_correct": None,
+    }
+    if example.answer_type == "numeric":
+        pred_num = parse_number(prediction)
+        gold_num = parse_number(example.gold_answer)
+        if pred_num is not None and gold_num is not None:
+            result["answer_correct"] = float(
+                math.isclose(pred_num, gold_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol)
+            )
+        else:
+            result["answer_correct"] = float(normalize_answer_text(prediction) == normalize_answer_text(example.gold_answer))
+        if example.gold_program:
+            pred_program = extract_section(prediction, PROGRAM_RE)
+            result["program_correct"] = float(normalize_program(pred_program) == normalize_program(example.gold_program))
+    elif example.answer_type == "mcq":
+        pred_option = extract_option(prediction)
+        gold_option = extract_option(example.gold_answer)
+        if pred_option and gold_option:
+            result["answer_correct"] = float(pred_option == gold_option)
+        else:
+            result["answer_correct"] = float(normalize_answer_text(prediction) == normalize_answer_text(example.gold_answer))
+    else:
+        result["answer_correct"] = float(normalize_answer_text(prediction) == normalize_answer_text(example.gold_answer))
+    return result
+
+
+def aggregate_scores(model_name: str, scores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for score in scores:
+        grouped.setdefault(score["task_name"], []).append(score)
+
+    rows: List[Dict[str, Any]] = []
+    primary_metrics = []
+    for task_name, task_scores in sorted(grouped.items()):
+        answer_acc = sum(item["answer_correct"] for item in task_scores) / len(task_scores)
+        row = {
+            "model_name": model_name,
+            "task_name": task_name,
+            "num_examples": len(task_scores),
+            "answer_accuracy": round(answer_acc, 6),
+            "primary_metric": round(answer_acc, 6),
+        }
+        program_scores = [item["program_correct"] for item in task_scores if item["program_correct"] is not None]
+        row["program_accuracy"] = round(sum(program_scores) / len(program_scores), 6) if program_scores else ""
+        rows.append(row)
+        primary_metrics.append(answer_acc)
+
+    if primary_metrics:
+        rows.append(
+            {
+                "model_name": model_name,
+                "task_name": "macro_average",
+                "num_examples": sum(row["num_examples"] for row in rows),
+                "answer_accuracy": round(sum(primary_metrics) / len(primary_metrics), 6),
+                "primary_metric": round(sum(primary_metrics) / len(primary_metrics), 6),
+                "program_accuracy": "",
+            }
+        )
+    return rows
+
+
+def save_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def save_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def unload_model(model, tokenizer) -> None:
+    del model
+    del tokenizer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def main() -> None:
+    args = parse_args()
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model_paths = parse_name_path_entries(args.model_entry)
+    if not model_paths:
+        raise ValueError("Please provide at least one --model_entry name=path")
+    adapter_paths = parse_name_path_entries(args.adapter_entry)
+    tokenizer_path = args.tokenizer_path or next(iter(model_paths.values()))
+
+    benchmark_examples: List[BenchmarkExample] = []
+    benchmark_examples.extend(load_convfinqa_examples(args.convfinqa_test_file, args.convfinqa_max_samples))
+    benchmark_examples.extend(
+        load_fineval_examples(args.fineval_dataset_name, args.fineval_split, args.fineval_local_file, args.fineval_max_samples)
+    )
+    cflue_task_files = parse_name_path_entries(args.cflue_task_file)
+    benchmark_examples.extend(load_cflue_examples(cflue_task_files, args.cflue_max_samples_per_task))
+
+    if not benchmark_examples:
+        raise ValueError("No benchmark examples were loaded. Please check your dataset paths and splits.")
+
+    manifest = {
+        "models": model_paths,
+        "adapters": adapter_paths,
+        "tokenizer_path": tokenizer_path,
+        "convfinqa_test_file": args.convfinqa_test_file,
+        "fineval_dataset_name": args.fineval_dataset_name,
+        "fineval_split": args.fineval_split,
+        "fineval_local_file": args.fineval_local_file,
+        "cflue_task_files": cflue_task_files,
+        "num_examples": len(benchmark_examples),
+    }
+    (output_dir / "benchmark_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    all_summary_rows: List[Dict[str, Any]] = []
+    for model_name, model_path in model_paths.items():
+        adapter_path = adapter_paths.get(model_name, "")
+        print(f"[eval] model={model_name} path={model_path} adapter={adapter_path or 'none'}")
+        model, tokenizer = load_model_and_tokenizer(model_path, tokenizer_path, adapter_path, args)
+        raw_predictions: List[Dict[str, Any]] = []
+        scores: List[Dict[str, Any]] = []
+        for example in tqdm(benchmark_examples, desc=f"Evaluating {model_name}"):
+            prediction = generate_response(model, tokenizer, example.prompt, args)
+            score = score_example(example, prediction, args)
+            scores.append(score)
+            raw_predictions.append(
+                {
+                    "model_name": model_name,
+                    "task_name": example.task_name,
+                    "record_id": example.record_id,
+                    "prompt": example.prompt,
+                    "gold_answer": example.gold_answer,
+                    "gold_program": example.gold_program,
+                    "prediction": prediction,
+                    "answer_correct": score["answer_correct"],
+                    "program_correct": score["program_correct"],
+                    "metadata": example.metadata,
+                }
+            )
+
+        save_jsonl(output_dir / f"{model_name}_predictions.jsonl", raw_predictions)
+        summary_rows = aggregate_scores(model_name, scores)
+        save_jsonl(output_dir / f"{model_name}_summary.jsonl", summary_rows)
+        all_summary_rows.extend(summary_rows)
+        unload_model(model, tokenizer)
+
+    save_csv(output_dir / "benchmark_summary.csv", all_summary_rows)
+    (output_dir / "benchmark_summary.json").write_text(
+        json.dumps(all_summary_rows, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[done] Saved benchmark outputs to: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
