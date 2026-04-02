@@ -23,6 +23,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
 OPTION_RE = re.compile(r"\b([A-F])\b", re.IGNORECASE)
+STRICT_OPTION_PATTERNS = [
+    re.compile(r"^[\s\(\[（【]*([A-F])[\s\)\]）】\.。,，:：-]*$", re.IGNORECASE),
+    re.compile(r"(?:最终答案|答案|正确答案|选项|answer|option)\s*(?:是|为|[:：])\s*([A-F])\b", re.IGNORECASE),
+]
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
@@ -62,6 +66,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--load_in_4bit", action="store_true")
     parser.add_argument("--convfinqa_test_file", type=str, default="")
     parser.add_argument("--convfinqa_max_samples", type=int, default=0)
+    parser.add_argument("--finqa_test_file", type=str, default="")
+    parser.add_argument("--finqa_max_samples", type=int, default=0)
     parser.add_argument("--fineval_dataset_name", type=str, default="FinGPT/fingpt-fineval")
     parser.add_argument("--fineval_split", type=str, default="test")
     parser.add_argument("--fineval_local_file", type=str, default="")
@@ -226,6 +232,37 @@ def build_convfinqa_prompt(record: Dict[str, Any]) -> BenchmarkExample:
     )
 
 
+def build_finqa_prompt(record: Dict[str, Any]) -> BenchmarkExample:
+    qa = record.get("qa") if isinstance(record.get("qa"), dict) else record
+    question = to_text(qa.get("question") or record.get("question"))
+    gold_answer = to_text(qa.get("exe_ans") or record.get("exe_ans") or qa.get("answer") or record.get("answer"))
+    gold_program = to_text(qa.get("program_re") or qa.get("program") or record.get("program_re") or record.get("program"))
+
+    prompt_parts = [
+        "你是一名金融表文混合推理助手。请结合文本、表格和问题，进行分步推理并给出最终答案。",
+    ]
+    prompt_parts.extend(build_context_sections(record, PROMPT_ARGS))
+    prompt_parts.append(f"问题：{question}")
+    prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
+
+    return BenchmarkExample(
+        task_name="finqa_test",
+        prompt="\n\n".join(prompt_parts),
+        gold_answer=gold_answer,
+        answer_type="numeric",
+        record_id=to_text(record.get("id") or qa.get("id") or record.get("filename")),
+        metadata={},
+        gold_program=gold_program,
+    )
+
+
+def load_finqa_examples(test_file: str, max_samples: int) -> List[BenchmarkExample]:
+    if not test_file:
+        return []
+    records = limit_records(load_json_records(Path(test_file)), max_samples)
+    return [build_finqa_prompt(record) for record in records]
+
+
 def combine_instruction_input(record: Dict[str, Any]) -> str:
     parts = [
         to_text(record.get("instruction")),
@@ -255,12 +292,20 @@ def render_options(options: Any) -> str:
 
 def extract_option(text: str) -> str:
     final_section = extract_section(text, FINAL_ANSWER_RE)
-    for candidate in [final_section, text]:
-        if not candidate:
+    candidates = [final_section] if final_section else []
+    if text:
+        candidates.append(text)
+    for candidate in candidates:
+        normalized = candidate.strip().upper()
+        if not normalized:
             continue
-        match = OPTION_RE.search(candidate.upper())
-        if match:
-            return match.group(1).upper()
+        for pattern in STRICT_OPTION_PATTERNS:
+            match = pattern.search(normalized)
+            if match:
+                return match.group(1).upper()
+        unique_options = list(dict.fromkeys(OPTION_RE.findall(normalized)))
+        if len(unique_options) == 1:
+            return unique_options[0].upper()
     return ""
 
 
@@ -469,13 +514,26 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
     return result
 
 
+def benchmark_bucket(task_name: str) -> str:
+    if task_name.startswith("convfinqa"):
+        return "convfinqa"
+    if task_name.startswith("finqa"):
+        return "finqa"
+    if task_name.startswith("fineval"):
+        return "fineval"
+    if task_name.startswith("cflue_"):
+        return "cflue"
+    return "other"
+
+
 def aggregate_scores(model_name: str, scores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for score in scores:
         grouped.setdefault(score["task_name"], []).append(score)
 
     rows: List[Dict[str, Any]] = []
-    primary_metrics = []
+    bucket_metrics: Dict[str, List[float]] = {}
+    total_examples = 0
     for task_name, task_scores in sorted(grouped.items()):
         answer_acc = sum(item["answer_correct"] for item in task_scores) / len(task_scores)
         row = {
@@ -488,16 +546,33 @@ def aggregate_scores(model_name: str, scores: List[Dict[str, Any]]) -> List[Dict
         program_scores = [item["program_correct"] for item in task_scores if item["program_correct"] is not None]
         row["program_accuracy"] = round(sum(program_scores) / len(program_scores), 6) if program_scores else ""
         rows.append(row)
-        primary_metrics.append(answer_acc)
+        bucket_metrics.setdefault(benchmark_bucket(task_name), []).append(answer_acc)
+        total_examples += len(task_scores)
 
-    if primary_metrics:
+    bucket_primary_metrics = []
+    for bucket_name, metrics in sorted(bucket_metrics.items()):
+        bucket_score = sum(metrics) / len(metrics)
+        rows.append(
+            {
+                "model_name": model_name,
+                "task_name": f"bucket_{bucket_name}",
+                "num_examples": total_examples,
+                "answer_accuracy": round(bucket_score, 6),
+                "primary_metric": round(bucket_score, 6),
+                "program_accuracy": "",
+            }
+        )
+        bucket_primary_metrics.append(bucket_score)
+
+    if bucket_primary_metrics:
+        overall = sum(bucket_primary_metrics) / len(bucket_primary_metrics)
         rows.append(
             {
                 "model_name": model_name,
                 "task_name": "macro_average",
-                "num_examples": sum(row["num_examples"] for row in rows),
-                "answer_accuracy": round(sum(primary_metrics) / len(primary_metrics), 6),
-                "primary_metric": round(sum(primary_metrics) / len(primary_metrics), 6),
+                "num_examples": total_examples,
+                "answer_accuracy": round(overall, 6),
+                "primary_metric": round(overall, 6),
                 "program_accuracy": "",
             }
         )
@@ -541,6 +616,7 @@ def main() -> None:
 
     benchmark_examples: List[BenchmarkExample] = []
     benchmark_examples.extend(load_convfinqa_examples(args.convfinqa_test_file, args.convfinqa_max_samples))
+    benchmark_examples.extend(load_finqa_examples(args.finqa_test_file, args.finqa_max_samples))
     benchmark_examples.extend(
         load_fineval_examples(args.fineval_dataset_name, args.fineval_split, args.fineval_local_file, args.fineval_max_samples)
     )
@@ -555,6 +631,7 @@ def main() -> None:
         "adapters": adapter_paths,
         "tokenizer_path": tokenizer_path,
         "convfinqa_test_file": args.convfinqa_test_file,
+        "finqa_test_file": args.finqa_test_file,
         "fineval_dataset_name": args.fineval_dataset_name,
         "fineval_split": args.fineval_split,
         "fineval_local_file": args.fineval_local_file,

@@ -1,0 +1,125 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, Optional
+
+from ..common import (
+    build_context_sections,
+    extract_numeric_text,
+    normalize_text_blocks,
+    safe_jsonable,
+    to_text,
+)
+
+NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
+
+
+def build_sft_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
+    qa = rec.get("qa") if isinstance(rec.get("qa"), dict) else rec
+    question = to_text(qa.get("question") or rec.get("question"))
+    if not question:
+        return None
+
+    program = to_text(qa.get("program_re") or qa.get("program") or rec.get("program_re") or rec.get("program"))
+    final_answer = to_text(qa.get("exe_ans") or rec.get("exe_ans") or qa.get("answer") or rec.get("answer"))
+    if not final_answer:
+        return None
+
+    gold_inds = qa.get("gold_inds") or rec.get("gold_inds") or []
+    supporting = normalize_text_blocks(gold_inds, args.max_supporting_facts, args.max_context_chars)
+
+    prompt_parts = [
+        "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。",
+    ]
+    prompt_parts.extend(build_context_sections(rec, args))
+    prompt_parts.append(f"问题：{question}")
+    prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
+
+    answer_lines = [
+        "问题分析：需要从财报文本和表格中定位相关指标，并依据程序完成数值计算。",
+        "关键证据：",
+    ]
+    if supporting:
+        answer_lines.extend([f"- {fact}" for fact in supporting])
+    else:
+        answer_lines.append("- 需要使用题目涉及的表格行列和相关文本说明。")
+    answer_lines.append(f"推理程序：{program or '请根据题意构造数值推理程序。'}")
+    answer_lines.append(f"最终答案：{extract_numeric_text(final_answer)}")
+
+    return {
+        "source_dataset": "FinQA",
+        "task_type": "financial_table_text_reasoning",
+        "record_id": to_text(rec.get("id")),
+        "metadata": {
+            "program": program,
+            "gold_inds": safe_jsonable(gold_inds),
+        },
+        "conversations": [
+            {"from": "human", "value": "\n\n".join(prompt_parts)},
+            {"from": "gpt", "value": "\n".join(answer_lines)},
+        ],
+    }
+
+
+def _mutate_numeric_answer(text: str) -> str:
+    final_answer_match = re.search(r"(最终答案：\s*)(.+)", text)
+    if final_answer_match:
+        answer_text = final_answer_match.group(2)
+        match = NUM_RE.search(answer_text)
+        if match:
+            token = match.group(0).replace(",", "")
+            try:
+                value = float(token)
+                mutated = value + 1 if value >= 0 else value - 1
+                replacement = str(int(mutated)) if mutated.is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
+            except Exception:
+                replacement = token + "1"
+            new_answer = answer_text[:match.start()] + replacement + answer_text[match.end():]
+            return text[:final_answer_match.start(2)] + new_answer + text[final_answer_match.end(2):]
+        return text[:final_answer_match.end(1)] + "信息不足，暂不作答。"
+
+    match = NUM_RE.search(text)
+    if not match:
+        return text + "\n最终答案：信息不足，暂不作答。"
+
+    token = match.group(0).replace(",", "")
+    try:
+        value = float(token)
+        mutated = value + 1 if value >= 0 else value - 1
+        replacement = str(int(mutated)) if mutated.is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
+    except Exception:
+        replacement = token + "1"
+    return text[:match.start()] + replacement + text[match.end():]
+
+
+def _remove_program_section(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("推理程序："):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def build_dpo_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
+    item = build_sft_item(rec, args)
+    if item is None:
+        return None
+
+    chosen = item["conversations"][1]["value"]
+    rejected = _mutate_numeric_answer(_remove_program_section(chosen))
+    if "推理程序：" not in rejected:
+        rejected += "\n推理程序：未给出。"
+
+    return {
+        "system": "",
+        "history": [],
+        "question": item["conversations"][0]["value"],
+        "response_chosen": chosen,
+        "response_rejected": rejected,
+        "source_dataset": item.get("source_dataset", "finqa"),
+        "record_id": item.get("record_id", ""),
+        "metadata": item.get("metadata", {}),
+    }

@@ -111,8 +111,8 @@ python evaluate_financial_benchmarks.py \
   --convfinqa_test_file /root/autodl-tmp/data/financial_reasoning/raw/convfinqa_turn/test_turn.json \
   --fineval_dataset_name FinGPT/fingpt-fineval \
   --fineval_split test \
-  --cflue_task_file bank=/root/autodl-tmp/data/financial_reasoning/raw/cflue/bank.jsonl \
-  --cflue_task_file securities=/root/autodl-tmp/data/financial_reasoning/raw/cflue/securities.jsonl \
+  --cflue_task_file application=/root/autodl-tmp/data/financial_reasoning/raw/cflue/application.json \
+  --cflue_task_file test=/root/autodl-tmp/data/financial_reasoning/raw/cflue/test.json \
   --output_dir /root/autodl-tmp/outputs/financial_reasoning/benchmarks/sft2_compare
 ```
 
