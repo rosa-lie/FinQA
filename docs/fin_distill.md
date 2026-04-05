@@ -19,12 +19,35 @@
 
 **💡 蒸馏：把“原始但不好学”的监督，变成“更自然、更稳定、更适合 student 学”的监督。**
 
+| 外部论文/项目                              | 核心思想                                                        | 对项目最对应的模块                                                | 该怎么借                                                                          | 预期收益                           | 当前优先级     |
+| ------------------------------------ | ----------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------ | --------- |
+| **STaR (2022)**                      | 生成 reasoning，只保留**最终答对**的 rationale 再继续训练                   | `distill_with_teacher.py` + `score_distill_candidates.py` | 不要“teacher 说什么都学”，而是保留 **答案正确 + 结构完整 + 程序一致** 的候选进 SFT                         | 提高蒸馏数据纯度，减少 teacher 噪声         | **最高**    |
+| **Distilling Step-by-Step (2023)**   | 用 **rationale / step-by-step** 作为额外监督，小模型更容易学会任务            |  `问题分析 / 关键证据 / 推理程序 / 最终答案` 四段式 target                 | 保持四段式结构，不要退化成只学 `最终答案`；后续可做“去掉某一段”的消融实验                                        | 提高 student 对中间推理链的学习能力         | **最高**    |
+| **DeepSeek-R1 (2025)**               | 先把 reasoning teacher 做强，再蒸到小模型；公开了 distilled dense models   | 未来的 “更强 teacher → 蒸 student” 路线                          | 现在可先用强 API / 强 checkpoint 做 teacher；后面若有更强 GRPO teacher，再二次蒸馏                 | 给提供“reasoning 小模型靠蒸馏是主流路线”的依据 | **高**     |
+| **Open-R1 (2025)**                   | 把 R1 的蒸馏、SFT、RL 训练 recipe 做成开源链路，且第一步就是蒸 R1-Distill         |  `build -> generate -> score -> train` 工程链路             | 参考其 synthetic reasoning data 的组织方式、生成和训练解耦方式、数据版本化                             | 帮把蒸馏从“想法”升级成规范工程流程            | **高**     |
+| **LLM KD Survey (2024)**             | 把 LLM 蒸馏分成 white-box / black-box / skill / vertical domains | “相关工作”和方法定位                                             | 用它来界定：做的是 **black-box response distillation + domain reasoning distillation** | 帮写项目文档、答辩、简历表述                | **中**     |
+| **KD for LLMs Survey (2024)**        | 讲方法、评测、应用，强调蒸馏不能只看通用语言能力，要看任务能力                             |  benchmark 设计                                           | 支撑“蒸馏是否有效，必须看 FinQA / ConvFinQA 指标，不看表面流畅度”这件事                                | 加强实验设计说服力                      | **中**     |
+| **RL-aware KD for Reasoning (2026)** | RL 训练出的 teacher，不一定能被普通 SFT 蒸馏完全吸收                          | 未来的 “GRPO 后 teacher 再蒸 student” 路线                       | 先不用复现，但可列为后续方向：若做 GRPO teacher，再研究 distill-after-RL                            | 让项目 roadmap 更完整                | **低（当前）** |
+
+
+| 当前项目模块                              | 最该参考的外部工作                  | 为什么最像                                                                    | 应该具体加什么                                                                                        |
+| ------------------------------------ | -------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `build_financial_distill_dataset.py` | Open-R1                    | Open-R1 很强调把生成和训练前处理解耦，先构造高质量 distill corpus，再独立训练                       | 给每条样本补足 `task_name / source_dataset / record_id / gold_answer / gold_program / prompt_len` 等元信息 |
+| `distill_with_teacher.py`            | STaR + Open-R1             | 一个强调多轮生成后只保留对的，一个强调高质量 reasoning corpus 生产                               | 每题保留 3–5 个候选；同时记录温度、teacher 名称、采样轮次                                                             |
+| `score_distill_candidates.py`        | STaR                       | 核心就是“不是所有 rationale 都值得学”                                                | 明确 hard filter：结构不完整直接丢；soft label：答案对但程序错的留作 DPO rejected / audit                              |
+| 蒸馏版 SFT 数据                           | Distilling Step-by-Step    | 该论文强调 rationale supervision 的价值                                          | 保持四段式输出，不要把数据压成单句 answer-only                                                                   |
+| 蒸馏版 DPO 数据                           | Open-R1 / DeepSeek-R1 思路延伸 | 多候选 reasoning 非常适合筛 chosen/rejected                                      | chosen 选“答案对+程序对+证据干净”；rejected 选“看起来像回事但可验证更差”的候选                                              |
+| 未来 GRPO 后再蒸                          | DeepSeek-R1 + RL-aware KD  | R1 的 distilled dense models 证明了“teacher 强了再蒸”是有效路线；RL-aware KD 说明这还是研究热点 | 先作为 roadmap，不要现在主攻                                                                              |
+
+
+
+
 ## 1. 目标
 
 
 > **target：可验证的结构化 reasoning data distillation**
 
-> 1. 找一个足够强的 teacher（闭源 API 或你后续更强 checkpoint）让它在 FinQA / ConvFinQA prompt 上生成结构化推理；  
+> 1. 找一个足够强的 teacher（闭源 API）让它在 FinQA / ConvFinQA prompt 上生成结构化推理；  
 > 2. 用答案 / program / evidence / structure 做自动验证；
 > 3. 把通过的候选变成：distilled SFT、distilled DPO、audit / verifier 数据；  
 > 4. benchmark 证明它比“非蒸馏 SFT”更好。
@@ -49,7 +72,7 @@ Stage 5：再把多候选转成 distilled DPO
 
 
 **Distilling Reasoning Capabilities into Smaller Language Models（2022）**：未来做蒸馏时，应该更重视：program consistency;evidence grounding;answer correctness。而不是只盯着“teacher 话术好不好看”。
- - 这会让你的蒸馏更偏“任务能力”，而不是“语言风格”。
+ - 这会让蒸馏更偏“任务能力”，而不是“语言风格”。
 
 **Deepseek-R**1：先用 RL / reasoning training 把 teacher 做强，再把 reasoning outputs 蒸到更小 student 上（即distill-R1）。
  - 小模型不一定非要自己学会“从零 RL 出 reasoning”；更现实的路线是：先把大模型训练成 reasoning teacher，再蒸给小模型。
