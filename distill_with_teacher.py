@@ -55,11 +55,18 @@ def make_generation_key(row: Dict[str, Any], candidate_index: int) -> str:
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
 
-def build_messages(system_prompt: str, prompt: str) -> List[Dict[str, str]]:
+def render_user_prompt(prompt: str, template_text: str) -> str:
+    template = template_text or "{{ prompt }}"
+    if "{{ prompt }}" in template:
+        return template.replace("{{ prompt }}", prompt)
+    return prompt
+
+
+def build_messages(system_prompt: str, prompt: str, template_text: str) -> List[Dict[str, str]]:
     messages: List[Dict[str, str]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
+    messages.append({"role": "user", "content": render_user_prompt(prompt, template_text)})
     return messages
 
 
@@ -88,7 +95,7 @@ def generate_with_openai(client: Any, model_name: str, messages: Sequence[Dict[s
     return content.strip(), raw
 
 
-def generate_candidate(row: Dict[str, Any], args: argparse.Namespace, system_prompt: str, temperature: float, client_bundle: Optional[Tuple[Any, str]]) -> Tuple[str, Dict[str, Any]]:
+def generate_candidate(row: Dict[str, Any], args: argparse.Namespace, system_prompt: str, user_template_text: str, temperature: float, client_bundle: Optional[Tuple[Any, str]]) -> Tuple[str, Dict[str, Any]]:
     if args.backend == "gold":
         return str(row.get("gold_response") or "").strip(), {"backend": "gold"}
     if args.backend == "copy_gold_final":
@@ -104,7 +111,7 @@ def generate_candidate(row: Dict[str, Any], args: argparse.Namespace, system_pro
     if client_bundle is None:
         raise ValueError("OpenAI-compatible backend requires a valid client.")
     client, model_name = client_bundle
-    messages = build_messages(system_prompt, str(row.get("prompt") or ""))
+    messages = build_messages(system_prompt, str(row.get("prompt") or ""), user_template_text)
     return generate_with_openai(client, model_name, messages, temperature, args.max_tokens, args.top_p)
 
 
@@ -119,8 +126,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--system_prompt", type=str, default="")
     parser.add_argument("--system_prompt_file", type=str, default="")
-    parser.add_argument("--num_candidates", type=int, default=3)
-    parser.add_argument("--temperature_schedule", type=str, default="0.0,0.4,0.7")
+    parser.add_argument("--user_template_file", type=str, default="prompts/financial_distill_teacher_user.txt")
+    parser.add_argument("--num_candidates", type=int, default=4)
+    parser.add_argument("--temperature_schedule", type=str, default="0.6")
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--max_rows", type=int, default=0)
@@ -148,6 +156,7 @@ def main() -> None:
 
     temperatures = parse_temperatures(args.temperature_schedule)
     system_prompt = read_system_prompt(args)
+    user_template_text = Path(args.user_template_file).read_text(encoding="utf-8").strip() if args.user_template_file else "{{ prompt }}"
     client_bundle = None
     resolved_model = ""
     if args.backend == "openai":
@@ -164,7 +173,7 @@ def main() -> None:
                     skipped += 1
                     continue
                 temperature = temperatures[candidate_index % len(temperatures)]
-                response_text, raw_response = generate_candidate(row, args, system_prompt, temperature, client_bundle)
+                response_text, raw_response = generate_candidate(row, args, system_prompt, user_template_text, temperature, client_bundle)
                 out = {
                     **row,
                     "candidate_index": candidate_index,

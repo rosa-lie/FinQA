@@ -1,7 +1,47 @@
-# 任务：金融对话数值推理模型：SFT → 轻量 DPO/GRPO → benchmark 评估
+# 任务：金融对话数值推理模型（FinGPT-R1）：SFT → 轻量 DPO/GRPO → benchmark 评估
+
 > 金融大模型真正难的，不是“知道一个金融术语”，而是“在金融场景里正确推理”。
 > **面向金融对话数值推理的 reasoning model：以 ConvFinQA 和 FinQA 为核心，辅以中文金融考试推理数据，训练一个能够进行多轮、数值、表文混合推理的金融小模型。**
 > 在数据侧，我以 ConvFinQA 和 FinQA 为主干，分别覆盖多轮对话推理与表文混合数值推理，再用 fingpt-fineval 和少量 fingpt-fiqa_qa 做中文金融知识和基础问答补强；在训练侧，我先通过 SFT 让模型学会金融推理，再基于答案正确性、程序一致性和结构约束设计可验证 reward 做轻量 GRPO；在评估侧，我用 FinQA/ConvFinQA 检验核心推理能力，用 CFLUE 检查中文泛化，用 FinanceBench 检查开放书金融 QA 迁移能力。这样形成了一个从训练到评估都围绕“金融 reasoning”展开的闭环。
+
+> 【】代表待完成
+
+**项目介绍**：**FinGPT-R1**：一款为金融数值推理领域设计的大语言模型，采用轻量化的 7B 参数量级架构。在降低部署成本的同时，该模型通过在针对金融推理场景的高质量思维链数据上采用 SFT（监督微调）和 RL（强化学习）训练，为模型在金融领域的应用提供了坚实的理论支撑、业务规则、决策逻辑以及技术实现能力，从而有效提升模型的金融复杂推理能力，为银行、证券、保险以及信托等金融核心业务场景提供有力支持。   
+
+**工作框架**：
+1. 基于 **DeepSeek-R1** 构建了数据蒸馏框架，并严格按照官方参数设定进行数据处理，采用两阶段数据筛选方法提升金融领域数据质量，生成了SFT数据集和RL数据集。
+2. 在训练过程中，利用**Qwen2.5-7B-Instruct**，通过监督微调（SFT）和强化学习（RL）训练金融推理大模型，以提升金融推理任务的准确性和泛化能力。
+
+
+ - 高质量的金融推理数据集：Fin-R1-Data，这是一个从多个权威金融数据集中提炼和过滤出的高质量COT数据集，专门设计用于专业金融推理场景。Fin-R1-Data涵盖了中英金融领域的多维专业知识，可以有效支持多个核心金融业务场景。型语言模型，精确满足金融行业对于决策过程、数字严谨性和强大商业泛化能力的核心需求。
+ - 两阶段模型构建框架：我们提出了一个两阶段的工作流程框架，包括构建高质量的CoT 数据集并通过监督微调 （SFT） 和强化学习 （RL） 训练模型，可以有效提高模型的财务推理性能。
+
+## 数据集
+
+**数据来源**：开源数据集包括**ConvFinQA** （陈等，2022），**FinQA** （陈等，2021）【Ant_Finance （支付宝团队，2023），FinanceIQ 独小漫DI 团队 （2023b），量化交易-指令 （FinanceQT） （Malik，2024）， Twitter-财经-新闻-情感 （TFNS） （匿名，2024），Finance-Instruct-500K （Flowers，2025），FinCorpus （独小漫DI 团队，2023a），和FinCUGE （Lu等，2023）】
+
+**数据构建**：为将 DeepSeek-R1 的推理能力迁移至金融场景并解决高质量金融推理数据问题，我们用Deepseek-R1（满血版）针对表格解析（FinQA）和多轮交互（ConvFinQA）等多个数据集进行领域知识蒸馏筛选，构建了约【】条面向专业金融推理场景的高质量Chains of Thought（CoT）数据集 Fin-R1-Data 。该数据集涵盖中英文金融垂直领域的多维度专业知识，并根据具体任务内容将其分为【】，可有效支撑银行、基金和证券等多个金融核心场景。本研究构建了基于 Deepseek-R1 的数据蒸馏框架，【并创新性提出对思维链进行“答案+推理”双轮质量打分筛选方法】，【首轮基于规则匹配和 Qwen2.5-72B-Instruct 对答案准确性评分】，次轮对推理链的逻辑一致性、术语合规性等推理逻辑进行深度校验以保证数据质量。
+
+**数据蒸馏**：先从 raw datasets 抽问题，用 DeepSeek-R1-671B 生成 reasoning path 和答案，温度设为 0.6；然后做两层过滤：
+ - answer check：客观题直接比答案，主观题用 LLM-as-a-Judge
+ - reasoning selection：再用 Qwen2.5-72B-Instruct 按 7 个维度筛 reasoning 质量
+
+**数据筛选**
+
+**数据集分布**
+
+## 训练
+
+**第一阶段——推理能力注入**：针对金融推理任务中的复杂推理，我们第一阶段使用 ConvFinQA 和 FinQA 金融数据集对 Qwen2.5-7B-Instruct 进行了监督微调。经过一轮微调训练，确保模型能够深入理解并处理复杂的金融推理问题。
+
+**第二阶段——强化学习优化**：在模型掌握复杂推理技能后，我们采用 GRPO（Group Relative Policy Optimization）算法作为核心框架，【】。
+
+## 评估
+
+**评估**：在金融推理方面的ConvFinQA和FinQA
+ - 评估流程：除 Finance-Instruct-500K 用分层采样的 10% test subset 外，其他数据集随机采样 1000 题，不足则全量；数值题不做生硬 exact match，而引入 LLM judge 处理格式差异和等价表达。来源
+ - 评估结果：
+
 
 # Done: 数据集
 
@@ -14,7 +54,8 @@
 | -------- | ----------------------------- | ------------- | ---------------- |
 | SFT-1    | FinQA                        | 学会表文混合数值推理    | 第一阶段            |
 | SFT-2    | ConvFinQA                    | 学会多轮 follow-up 推理 | 第二阶段            |
-| Joint SFT | FinQA + ConvFinQA            | 作为对照基线            | 需在 SFT v2 数据上重跑 |
+| Joint SFT | FinQA + ConvFinQA            | 对比实验            | 混合训练 |
+| SFT（可选） | 其他Fin问答数据集            | 补充            |  |
 | DPO（可选）  | 从 SFT 样本自动构造                  | 优化表达质量、结构、少废话 | 小规模就够            |
 | GRPO（推荐） | 基于可验证 reward                  | 优化答案正确性和推理格式  | 更贴合 reason model |
 
@@ -101,9 +142,58 @@ SFT2（ConvFinQA turn）：
 - 总字符：`<=6000`
 - 单轮字符：`<=2500`
 
+# Doing：distillation
+
+[distill文档](doc/fin_distill.md)
+
+> **target：可验证的结构化 reasoning data distillation**
+
+> 1. 找一个足够强的 teacher（闭源 API 或你后续更强 checkpoint）让它在 FinQA / ConvFinQA prompt 上生成结构化推理；  
+> 2. 用答案 / program / evidence / structure 做自动验证；
+> 3. 把通过的候选变成：distilled SFT、distilled DPO、audit / verifier 数据；  
+> 4. benchmark 证明它比“非蒸馏 SFT”更好。
+
+我采用 **black-box response distillation** ，将高能力 teacher 的结构化推理轨迹迁移到学生模型，并通过自动验证机制控制监督质量。
+- 受 STaR 启发，我们不直接使用所有 teacher outputs，而是仅保留通过数值正确性、结构完整性与程序一致性校验的候选，构建高质量 reasoning distillation 数据集。
+- 参考Deepseek-R1以及相关复现项目Open-R1，落地到金融数值推理领域中。
+
+Stage 1：用现有 processor 构造高一致性 prompt  
+Stage 2：teacher 生成多个 reasoning 候选  
+Stage 3：用 verifier / 规则做 outcome filtering  
+Stage 4：先做 distilled SFT  
+Stage 5：再把多候选转成 distilled DPO
+
+**reference：**
+
+**STaR: Bootstrapping Reasoning With Reasoning（2022）**：先让模型尝试生成 reasoning；只保留那些“最终答对”的 reasoning；再用这些正确 reasoning 反过来继续训练模型。
+ - teacher 生成多个候选
+ - 用答案 / 程序 / 结构 / JSON 痕迹校验
+ - 保留通过的候选
+蒸馏数据的价值，不在于 teacher 生成了多少，而在于 teacher 生成中有多少“正确可学”的 reasoning。
+
+
+**Distilling Reasoning Capabilities into Smaller Language Models（2022）**：未来做蒸馏时，应该更重视：program consistency;evidence grounding;answer correctness。而不是只盯着“teacher 话术好不好看”。
+ - 这会让你的蒸馏更偏“任务能力”，而不是“语言风格”。
+
+**Deepseek-R**1：先用 RL / reasoning training 把 teacher 做强，再把 reasoning outputs 蒸到更小 student 上（即distill-R1）。
+ - 小模型不一定非要自己学会“从零 RL 出 reasoning”；更现实的路线是：先把大模型训练成 reasoning teacher，再蒸给小模型。
+
+**重点复现：[open-r1](https://github.com/huggingface/open-r1)**
+1. synthetic reasoning data generation
+2. generate → filter → train
+3. 如何处理 reasoning traces：trace 是完整保留还是裁剪；答案和 reasoning 的拼接格式；有没有 verifier / filtering 逻辑。
+
+Tiny-Zero/EasyR1：增强教师。
+
+> 未来展望：RL 后的 teacher，能不能直接拿它输出蒸 student？RL-aware distillation。
+
 # Done: SFT
 
-## 遇到问题：loss spike
+## 遇到问题
+
+因为FinQA和ConvQA是数值推理数据集，尤其ConvQA涉及到了多轮对话，因此对于数据集处理要求很高，我优化数据集处理的过程主要聚焦于数据清洗过滤和推理过程生成。推理过程生成采用了脚本生成和蒸馏生成两种方式，最后经过比较蒸馏生成效果显著，证明了蒸馏的必要性。
+
+### loss spike
 
 `checkpoint-600` loss 正常下降；`checkpoint-800`出现 spike（约 `0.4 -> 4.0`）。
 

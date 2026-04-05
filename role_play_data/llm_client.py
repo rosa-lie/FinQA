@@ -2,7 +2,7 @@
 """
 @description: Multi-provider LLM client for medical data generation.
 
-Supports OpenAI, Doubao (ByteDance), and MiniMax via OpenAI-compatible API.
+Supports OpenAI, DeepSeek, Doubao (ByteDance), and MiniMax via OpenAI-compatible API.
 
 Usage:
     from llm_client import create_llm_client
@@ -13,6 +13,7 @@ Usage:
     # Or specify provider explicitly
     client, model = create_llm_client(provider="minimax")
     client, model = create_llm_client(provider="openai")
+    client, model = create_llm_client(provider="deepseek")
     client, model = create_llm_client(provider="doubao")
 """
 
@@ -27,6 +28,11 @@ PROVIDER_CONFIGS = {
         "base_url": None,  # Uses default OpenAI endpoint
         "default_model": "gpt-4o",
     },
+    "deepseek": {
+        "env_key": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "default_model": "deepseek-reasoner",
+    },
     "doubao": {
         "env_key": "DOUBAO_API_KEY",
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
@@ -40,14 +46,14 @@ PROVIDER_CONFIGS = {
 }
 
 # Detection order for auto-detection
-_DETECTION_ORDER = ["openai", "minimax", "doubao"]
+_DETECTION_ORDER = ["openai", "deepseek", "minimax", "doubao"]
 
 
 def detect_provider():
     """Auto-detect LLM provider from environment variables.
 
     Returns the first provider whose API key is found in the environment.
-    Detection order: openai, minimax, doubao.
+    Detection order: openai, deepseek, minimax, doubao.
     """
     for provider in _DETECTION_ORDER:
         config = PROVIDER_CONFIGS[provider]
@@ -60,7 +66,7 @@ def create_llm_client(provider=None, api_key=None, base_url=None, model=None):
     """Create an OpenAI-compatible client for the specified LLM provider.
 
     Args:
-        provider: Provider name ("openai", "doubao", "minimax").
+        provider: Provider name ("openai", "deepseek", "doubao", "minimax").
                   If None, auto-detects from environment variables.
         api_key: API key override. If None, reads from environment.
         base_url: Base URL override. If None, uses provider default.
