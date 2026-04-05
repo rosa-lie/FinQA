@@ -7,7 +7,7 @@ import os
 from copy import deepcopy
 from dataclasses import dataclass, field
 from glob import glob
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 from datasets import load_dataset
@@ -283,7 +283,11 @@ def main():
     max_target_length = args.max_target_length
     full_max_length = max_source_length + max_target_length
 
-    def return_prompt_and_responses(examples) -> Dict[str, str]:
+    def _token_lengths(texts: List[str]) -> List[int]:
+        tokenized = tokenizer(texts, add_special_tokens=False)
+        return [len(ids) for ids in tokenized["input_ids"]]
+
+    def return_prompt_and_responses(examples) -> Dict[str, List[str]]:
         """Load the paired dataset and convert it to the necessary format.
 
         The dataset is converted to a dictionary with the following structure:
@@ -301,10 +305,15 @@ def main():
             system_prompt = system or ""
             history_with_question = history + [[question, '']] if history else [[question, '']]
             prompts.append(prompt_template.get_prompt(messages=history_with_question, system_prompt=system_prompt))
+        chosen = examples["response_chosen"]
+        rejected = examples["response_rejected"]
         return {
             "prompt": prompts,
-            "chosen": examples["response_chosen"],
-            "rejected": examples["response_rejected"],
+            "chosen": chosen,
+            "rejected": rejected,
+            "prompt_len": _token_lengths(prompts),
+            "chosen_len": _token_lengths(chosen),
+            "rejected_len": _token_lengths(rejected),
         }
 
     # Preprocess the dataset
@@ -328,8 +337,13 @@ def main():
             desc="Running tokenizer on dataset",
         )
         train_dataset = tokenized_dataset.filter(
-            lambda x: 0 < len(x['prompt'] + x['chosen']) <= full_max_length
-                      and 0 < len(x['prompt'] + x['rejected']) <= full_max_length
+            lambda x: (
+                0 < x['prompt_len'] <= max_source_length
+                and args.min_target_length <= x['chosen_len'] <= max_target_length
+                and args.min_target_length <= x['rejected_len'] <= max_target_length
+                and x['prompt_len'] + x['chosen_len'] <= full_max_length
+                and x['prompt_len'] + x['rejected_len'] <= full_max_length
+            )
         )
         logger.debug(f"Num train_samples: {len(train_dataset)}")
         logger.debug("First train example:")
@@ -340,7 +354,7 @@ def main():
 
     eval_dataset = None
     max_eval_samples = 0
-    if args.do_eval and eval_dataset is not None and len(eval_dataset) > 0:
+    if args.do_eval:
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = raw_datasets["validation"]
@@ -358,8 +372,13 @@ def main():
             desc="Running tokenizer on dataset",
         )
         eval_dataset = eval_dataset.filter(
-            lambda x: 0 < len(x['prompt'] + x['chosen']) <= full_max_length
-                      and 0 < len(x['prompt'] + x['rejected']) <= full_max_length
+            lambda x: (
+                0 < x['prompt_len'] <= max_source_length
+                and args.min_target_length <= x['chosen_len'] <= max_target_length
+                and args.min_target_length <= x['rejected_len'] <= max_target_length
+                and x['prompt_len'] + x['chosen_len'] <= full_max_length
+                and x['prompt_len'] + x['rejected_len'] <= full_max_length
+            )
         )
         logger.debug(f"Num eval_samples: {len(eval_dataset)}")
         if len(eval_dataset) > 0:
@@ -508,7 +527,7 @@ def main():
             trainer.model.save_pretrained(args.output_dir)
 
     # Evaluation
-    if args.do_eval and eval_dataset is not None and len(eval_dataset) > 0:
+    if args.do_eval:
         if trainer.is_world_process_zero():
             logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()

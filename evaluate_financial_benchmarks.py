@@ -30,6 +30,8 @@ STRICT_OPTION_PATTERNS = [
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
+NUMERIC_STRUCTURED_ANCHORS = ["问题分析：", "关键证据：", "推理程序：", "最终答案："]
+MCQ_STRUCTURED_ANCHORS = ["题目理解：", "推理：", "最终答案："]
 
 
 @dataclass
@@ -482,6 +484,15 @@ def normalize_answer_text(text: str) -> str:
 
 
 def score_example(example: BenchmarkExample, prediction: str, args: argparse.Namespace) -> Dict[str, Any]:
+    final_answer = extract_section(prediction, FINAL_ANSWER_RE)
+    program_section = extract_section(prediction, PROGRAM_RE)
+    if example.answer_type == "numeric":
+        structured_anchors = NUMERIC_STRUCTURED_ANCHORS
+    elif example.answer_type == "mcq":
+        structured_anchors = MCQ_STRUCTURED_ANCHORS
+    else:
+        structured_anchors = ["最终答案："]
+
     result = {
         "task_name": example.task_name,
         "record_id": example.record_id,
@@ -489,10 +500,16 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         "prediction": prediction,
         "answer_correct": 0.0,
         "program_correct": None,
+        "final_answer_coverage": float(bool(final_answer)),
+        "program_section_coverage": float(bool(program_section)),
+        "structured_response_coverage": float(all(anchor in (prediction or "") for anchor in structured_anchors)),
+        "prediction_chars": len((prediction or "").strip()),
+        "numeric_parse_rate": None,
     }
     if example.answer_type == "numeric":
         pred_num = parse_number(prediction)
         gold_num = parse_number(example.gold_answer)
+        result["numeric_parse_rate"] = float(pred_num is not None)
         if pred_num is not None and gold_num is not None:
             result["answer_correct"] = float(
                 math.isclose(pred_num, gold_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol)
@@ -500,8 +517,7 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         else:
             result["answer_correct"] = float(normalize_answer_text(prediction) == normalize_answer_text(example.gold_answer))
         if example.gold_program:
-            pred_program = extract_section(prediction, PROGRAM_RE)
-            result["program_correct"] = float(normalize_program(pred_program) == normalize_program(example.gold_program))
+            result["program_correct"] = float(normalize_program(program_section) == normalize_program(example.gold_program))
     elif example.answer_type == "mcq":
         pred_option = extract_option(prediction)
         gold_option = extract_option(example.gold_answer)
@@ -526,56 +542,55 @@ def benchmark_bucket(task_name: str) -> str:
     return "other"
 
 
+def _mean(values: List[float]) -> Any:
+    if not values:
+        return ""
+    return round(sum(values) / len(values), 6)
+
+
+def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, Any]]) -> Dict[str, Any]:
+    answer_scores = [item["answer_correct"] for item in scores]
+    program_scores = [item["program_correct"] for item in scores if item["program_correct"] is not None]
+    final_answer_scores = [item["final_answer_coverage"] for item in scores]
+    program_section_scores = [item["program_section_coverage"] for item in scores]
+    structured_scores = [item["structured_response_coverage"] for item in scores]
+    prediction_chars = [item["prediction_chars"] for item in scores]
+    numeric_parse_scores = [item["numeric_parse_rate"] for item in scores if item["numeric_parse_rate"] is not None]
+    answer_acc = sum(answer_scores) / len(answer_scores)
+    return {
+        "model_name": model_name,
+        "task_name": task_name,
+        "num_examples": len(scores),
+        "answer_accuracy": round(answer_acc, 6),
+        "primary_metric": round(answer_acc, 6),
+        "program_accuracy": _mean(program_scores),
+        "final_answer_coverage": _mean(final_answer_scores),
+        "program_section_coverage": _mean(program_section_scores),
+        "structured_response_coverage": _mean(structured_scores),
+        "numeric_parse_rate": _mean(numeric_parse_scores),
+        "avg_prediction_chars": _mean(prediction_chars),
+    }
+
+
 def aggregate_scores(model_name: str, scores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for score in scores:
         grouped.setdefault(score["task_name"], []).append(score)
 
     rows: List[Dict[str, Any]] = []
-    bucket_metrics: Dict[str, List[float]] = {}
-    total_examples = 0
+    bucket_scores: Dict[str, List[Dict[str, Any]]] = {}
+    all_task_rows: List[Dict[str, Any]] = []
     for task_name, task_scores in sorted(grouped.items()):
-        answer_acc = sum(item["answer_correct"] for item in task_scores) / len(task_scores)
-        row = {
-            "model_name": model_name,
-            "task_name": task_name,
-            "num_examples": len(task_scores),
-            "answer_accuracy": round(answer_acc, 6),
-            "primary_metric": round(answer_acc, 6),
-        }
-        program_scores = [item["program_correct"] for item in task_scores if item["program_correct"] is not None]
-        row["program_accuracy"] = round(sum(program_scores) / len(program_scores), 6) if program_scores else ""
+        row = _build_summary_row(model_name, task_name, task_scores)
         rows.append(row)
-        bucket_metrics.setdefault(benchmark_bucket(task_name), []).append(answer_acc)
-        total_examples += len(task_scores)
+        all_task_rows.append(row)
+        bucket_scores.setdefault(benchmark_bucket(task_name), []).extend(task_scores)
 
-    bucket_primary_metrics = []
-    for bucket_name, metrics in sorted(bucket_metrics.items()):
-        bucket_score = sum(metrics) / len(metrics)
-        rows.append(
-            {
-                "model_name": model_name,
-                "task_name": f"bucket_{bucket_name}",
-                "num_examples": total_examples,
-                "answer_accuracy": round(bucket_score, 6),
-                "primary_metric": round(bucket_score, 6),
-                "program_accuracy": "",
-            }
-        )
-        bucket_primary_metrics.append(bucket_score)
+    for bucket_name, grouped_scores in sorted(bucket_scores.items()):
+        rows.append(_build_summary_row(model_name, f"bucket_{bucket_name}", grouped_scores))
 
-    if bucket_primary_metrics:
-        overall = sum(bucket_primary_metrics) / len(bucket_primary_metrics)
-        rows.append(
-            {
-                "model_name": model_name,
-                "task_name": "macro_average",
-                "num_examples": total_examples,
-                "answer_accuracy": round(overall, 6),
-                "primary_metric": round(overall, 6),
-                "program_accuracy": "",
-            }
-        )
+    if scores:
+        rows.append(_build_summary_row(model_name, "macro_average", scores))
     return rows
 
 
