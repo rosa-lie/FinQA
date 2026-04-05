@@ -8,8 +8,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ..common import (
     build_context_sections,
     extract_numeric_text,
-    normalize_text_blocks,
     safe_jsonable,
+    summarize_evidence_blocks,
+    summarize_history_questions,
     to_text,
 )
 
@@ -36,6 +37,7 @@ def build_sft_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
             turn_ind = annotation.get("turn_ind")
         if dialogue_break and isinstance(turn_ind, int):
             prior_questions = [to_text(x) for x in dialogue_break[:turn_ind] if to_text(x)]
+    prior_questions = summarize_history_questions(prior_questions, args.max_history_turns, args.max_context_chars)
 
     program = to_text(
         rec.get("cur_program")
@@ -56,25 +58,25 @@ def build_sft_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
         return None
 
     gold_ind = qa.get("gold_inds") or rec.get("gold_ind") or rec.get("gold_inds") or annotation.get("gold_ind") or []
-    gold_facts = normalize_text_blocks(gold_ind, args.max_supporting_facts, args.max_context_chars)
+    gold_facts = summarize_evidence_blocks(gold_ind, args.max_supporting_facts, args.max_context_chars)
 
     prompt_parts = [
         "你是一名金融数值推理助手。请结合对话历史、文本材料和表格，进行分步推理并给出最终数值答案。",
     ]
     if prior_questions:
-        prompt_parts.append("历史对话：\n" + "\n".join(f"- {q}" for q in prior_questions[-args.max_history_turns:]))
+        prompt_parts.append("历史对话：\n" + "\n".join(f"- {q}" for q in prior_questions))
     prompt_parts.extend(build_context_sections(rec, args))
     prompt_parts.append(f"当前问题：{current_question}")
     prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
 
     answer_lines = [
-        "问题分析：这是一个需要结合历史对话与财务材料进行数值推理的问题。",
+        "问题分析：需要结合当前问题、历史对话和财务材料定位指标后再做数值计算。",
         "关键证据：",
     ]
     if gold_facts:
         answer_lines.extend([f"- {fact}" for fact in gold_facts])
     else:
-        answer_lines.append("- 需要从给定文本与表格中抽取相关财务指标，并与历史问题保持一致。")
+        answer_lines.append("- 需要结合历史追问和当前表格中的相关财务指标完成计算。")
     answer_lines.append(f"推理程序：{program or '请依据材料逐步完成数值计算。'}")
     answer_lines.append(f"最终答案：{extract_numeric_text(final_answer)}")
 
@@ -223,7 +225,7 @@ def _mutate_program_section(text: str) -> str:
         else:
             out.append(line)
     if not changed:
-        out.append("推理程序：忽略上轮筛选条件，按当前轮近似口径计算。")
+        out.append("推理程序：采用相邻年份近似估算，并忽略历史追问中的筛选条件。")
     return "\n".join(out)
 
 
@@ -240,28 +242,27 @@ def _mutate_evidence_section(text: str) -> str:
             end = i
             break
 
-    mutated_evidence = ["- 误把上一轮无关指标和相邻年份数据作为证据。"]
-    return "\n".join(lines[: start + 1] + mutated_evidence + lines[end:])
+    mutated = ["- 误把上轮问题中的参考值当作本轮计算依据。"]
+    return "\n".join(lines[: start + 1] + mutated + lines[end:])
 
 
-def _mutate_dialog_state(text: str) -> str:
+def _mutate_analysis_section(text: str) -> str:
     lines = []
     changed = False
     for line in text.splitlines():
         if line.startswith("问题分析："):
-            lines.append("问题分析：将当前问题按独立问题处理，未继承历史轮次限制条件。")
+            lines.append("问题分析：沿用上轮口径近似估算，并默认本轮筛选条件没有变化。")
             changed = True
         else:
             lines.append(line)
     if not changed:
-        lines.insert(0, "问题分析：按独立问题处理，未继承历史轮次限制条件。")
+        lines.insert(0, "问题分析：沿用上轮口径近似估算，并默认筛选条件不变。")
     return "\n".join(lines)
 
 
 def _build_high_confusion_rejected(chosen: str) -> str:
     rejected = chosen
-    # conversational hard-negative: dialogue-state + grounding + program + numeric perturbation
-    rejected = _mutate_dialog_state(rejected)
+    rejected = _mutate_analysis_section(rejected)
     rejected = _mutate_evidence_section(rejected)
     rejected = _mutate_program_section(rejected)
     rejected = _mutate_numeric_answer(rejected)

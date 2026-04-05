@@ -48,18 +48,31 @@ https://huggingface.co/datasets/AdaptLLM/ConvFinQA/
 ### 处理规则
 
 1. `finqa`
-- 转为结构化 SFT 样本：`问题分析 / 关键证据 / 推理程序 / 最终答案`
+- 转为**结构化 SFT 样本：`问题分析 / 关键证据 / 推理程序 / 最终答案`**
+- `关键证据` **由 `gold_inds` 摘要生成，不再直接输出原始 JSON 片段** （即清除了数据集中的结构化格式转化成人类自然语言）
 - DPO 基于同一 gold 样本构造 chosen/rejected
 
 2. `convfinqa_turn`
-- 转为多轮对话数值推理 SFT 样本（历史对话 + 表文上下文 + 当前问题）
+- 转为**多轮对话数值推理 SFT 样本（历史对话 + 表文上下文 + 当前问题）**
+- 历史问题**先压缩**，再写入 prompt，**避免上下文过长** （每条按 `max_context_chars` 截断）
+- `关键证据` 由 `gold_ind/gold_inds` 摘要生成，不再直接输出原始 JSON 片段（即清除了数据集中的结构化格式转化成人类自然语言）
 - **默认只保留最终轮**（`--convfinqa_keep_final_only=true`）
 - 去重主键：`(filename, qa.question, qa.program, qa.answer)`
-- 每个 key 仅保留 `turn_ind` 最大样本；缺失时回退 `id` 后缀 `_N`
+- 每个 key **仅保留 `turn_ind` 最大样本**；缺失时回退 `id` 后缀 `_N`
 - DPO 与 SFT 共享同一去重口径，避免分布不一致
 
 3. `fineval` / `fiqa_qa`
 - 各自独立处理器，维持对应模板与输出结构
+
+```
+"问题分析：需要从财报文本和表格中定位相关指标，并依据程序完成数值计算。 关键证据： - {"text_1": "if libor changes by 100 basis points , our annual interest expense would change by $ 3.8 million ."} 推理程序：divide(3.8, divide(100, 100)) 最终答案：3.8"
+⬇️
+"问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。\n关键证据：\n- text_1: if libor changes by 100 basis points , our annual interest expense would change by $ 3.8 million .\n推理程序：divide(3.8, divide(100, 100))\n最终答案：3.8"
+
+"问题分析：这是一个需要结合历史对话与财务材料进行数值推理的问题。 关键证据： - {"table_1": "the net sales of 2002 is $ 5742 ; the net sales of 2001 is $ 5363 ; the net sales of 2000 is $ 7983 ;"} 推理程序：divide(subtract(5363, 7983), 7983) 最终答案：-32%"
+⬇️
+"问题分析：需要结合当前问题、历史对话和财务材料定位指标后再做数值计算。\n关键证据：\n- table_1: the net sales of 2002 is $ 5742 ; the net sales of 2001 is $ 5363 ; the net sales of 2000 is $ 7983 ;\n推理程序：divide(subtract(5363, 7983), 7983)\n最终答案：-32%"
+```
 
 ### 兼容说明
 
@@ -68,18 +81,22 @@ https://huggingface.co/datasets/AdaptLLM/ConvFinQA/
 
 ---
 
-对于金融对话数值推理任务，联合训练（joint training）比简单的分阶段训练更有效。
+## SFT v2 数据原则
 
-## 混合训练
+当前不再预设“联合训练优于分阶段训练”。在旧版 benchmark 中，`sft_merged` 低于 `base`，说明**原始 SFT target 设计存在问题**。
+
+SFT v2 的目标是先修正监督信号，再重新比较 `SFT-1 / SFT-2 / Joint SFT`：
+- **不把原始 `gold_ind/gold_inds` JSON 直接监督给模型**
+- 保留可验证 `推理程序` 和 `最终答案`
+- 对 `ConvFinQA` 历史问题**做压缩，减少长上下文噪声**
 
 ## 两阶段 SFT 方案
-
-将当前 `run_fingpt_min.ipynb` 调整为：
 
 - **SFT-1：FinQA**（先学会表文混合数值推理）
 - **SFT-2：ConvFinQA**（再学会多轮对话 follow-up 推理）
 
-> FinQA 更像“推理教材”，因为它的单题结构更清楚、监督更强，适合先把模型拉进“会算、会推”的状态；ConvFinQA 更像“真实场景”，因为它把推理放进了连续对话里，适合第二阶段把模型从“会做题”推进到“会连续追问下做题”。
+> FinQA 更像“推理教材”，因为它的单题结构更清楚、监督更强，适合先把模型拉进“会算、会推”的状态；  
+> ConvFinQA 更像“真实场景”，因为它把推理放进了连续对话里，适合第二阶段把模型从“会做题”推进到“会连续追问下做题”。
 
 ### Notebook 中的关键对齐
 
@@ -87,6 +104,16 @@ https://huggingface.co/datasets/AdaptLLM/ConvFinQA/
 - `SFT2_DATA_SPECS`：仅 `fingpt_convfinqa_train`
 - 清洗链路保持一致：`clean -> audit -> strict`
 - 阶段二不再混入 `fineval/fiqa_qa`，也不做 replay
+
+### SFT v2 审计要求
+
+在重新生成 strict 文件后，训练前至少检查：
+- `json_like_evidence_ratio`：答案中残留原始 JSON 证据的比例
+- `structured_answer_ratio`：是否稳定包含四个结构锚点
+- `avg_prompt_chars` / `avg_answer_chars`：长度是否失控
+- preview 样本中是否仍出现 `{"text_` / `{"table_` 一类原始证据块
+
+如果这些指标不通过，不建议直接进入 SFT 训练。
 
 ---
 

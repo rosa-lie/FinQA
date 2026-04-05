@@ -1,0 +1,228 @@
+[
+    {
+        "source_dataset": "FinQA",
+        "task_type": "financial_table_text_reasoning",
+        "record_id": "ADI/2009/page_49.pdf-1",
+        "metadata": {
+            "program": "divide(3.8, divide(100, 100))",
+            "gold_inds": {
+                "text_1": "if libor changes by 100 basis points , our annual interest expense would change by $ 3.8 million ."
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。\n\n材料（表格前文本）：\n- interest rate to a variable interest rate based on the three-month libor plus 2.05% ( 2.05 % ) ( 2.34% ( 2.34 % ) as of october 31 , 2009 ) .\n- if libor changes by 100 basis points , our annual interest expense would change by $ 3.8 million .\n- foreign currency exposure as more fully described in note 2i .\n- in the notes to consolidated financial statements contained in item 8 of this annual report on form 10-k , we regularly hedge our non-u.s .\n- dollar-based exposures by entering into forward foreign currency exchange contracts .\n- the terms of these contracts are for periods matching the duration of the underlying exposure and generally range from one month to twelve months .\n\n表格：\n | october 31 2009 | november 1 2008\nfair value of forward exchange contracts asset ( liability ) | $ 6427 | $ -23158 ( 23158 )\nfair value of forward exchange contracts after a 10% ( 10 % ) unfavorable mov... | $ 20132 | $ -9457 ( 9457 )\nfair value of forward exchange contracts after a 10% ( 10 % ) favorable movem... | $ -6781 ( 6781 ) | $ -38294 ( 38294 )\n\n材料（表格后文本）：\n- fair value of forward exchange contracts after a 10% ( 10 % ) unfavorable movement in foreign currency exchange rates asset ( liability ) .\n- .\n- .\n- .\n- .\n- .\n\n问题：what is the the interest expense in 2009?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。\n关键证据：\n- text_1: if libor changes by 100 basis points , our annual interest expense would change by $ 3.8 million .\n推理程序：divide(3.8, divide(100, 100))\n最终答案：3.8"
+            }
+        ]
+    },
+    {
+        "source_dataset": "FinQA",
+        "task_type": "financial_table_text_reasoning",
+        "record_id": "AAL/2018/page_13.pdf-2",
+        "metadata": {
+            "program": "divide(9896, 23.6%)",
+            "gold_inds": {
+                "table_1": "year the 2018 of gallons is 4447 ; the 2018 of average priceper gallon is $ 2.23 ; the 2018 of aircraft fuelexpense is $ 9896 ; the 2018 of percent of totaloperating expenses is 23.6% ( 23.6 % ) ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。\n\n材料（表格前文本）：\n- the following table shows annual aircraft fuel consumption and costs , including taxes , for our mainline and regional operations for 2018 , 2017 and 2016 ( gallons and aircraft fuel expense in millions ) .\n- year gallons average price per gallon aircraft fuel expense percent of total operating expenses .\n\n表格：\nyear | gallons | average priceper gallon | aircraft fuelexpense | percent of totaloperating expenses\n2018 | 4447 | $ 2.23 | $ 9896 | 23.6% ( 23.6 % )\n2017 | 4352 | 1.73 | 7510 | 19.6% ( 19.6 % )\n2016 | 4347 | 1.42 | 6180 | 17.6% ( 17.6 % )\n\n材料（表格后文本）：\n- as of december 31 , 2018 , we did not have any fuel hedging contracts outstanding to hedge our fuel consumption .\n- as such , and assuming we do not enter into any future transactions to hedge our fuel consumption , we will continue to be fully exposed to fluctuations in fuel prices .\n- our current policy is not to enter into transactions to hedge our fuel consumption , although we review that policy from time to time based on market conditions and other factors .\n- fuel prices have fluctuated substantially over the past several years .\n- we cannot predict the future availability , price volatility or cost of aircraft fuel .\n- natural disasters ( including hurricanes or similar events in the u.s .\n\n问题：what was the total operating expenses in 2018 in millions\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。\n关键证据：\n- table_1: year the 2018 of gallons is 4447 ; the 2018 of average priceper gallon is $ 2.23 ; the 2018 of aircraft fuelexpense is $ 9896 ; the 2018 of percent of totaloperating expenses is 23.6% ( 23.6 % ) ;\n推理程序：divide(9896, 23.6%)\n最终答案：41932.20339"
+            }
+        ]
+    },
+    {
+        "source_dataset": "FinQA",
+        "task_type": "financial_table_text_reasoning",
+        "record_id": "INTC/2013/page_71.pdf-4",
+        "metadata": {
+            "program": "divide(14001, 26302)",
+            "gold_inds": {
+                "table_1": "( in millions ) the available-for-sale investments of dec 282013 is $ 18086 ; the available-for-sale investments of dec 292012 is $ 14001 ;",
+                "table_8": "( in millions ) the total cash and investments of dec 282013 is $ 31561 ; the total cash and investments of dec 292012 is $ 26302 ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。\n\n材料（表格前文本）：\n- the fair value of our grants receivable is determined using a discounted cash flow model , which discounts future cash flows using an appropriate yield curve .\n- as of december 28 , 2013 , and december 29 , 2012 , the carrying amount of our grants receivable was classified within other current assets and other long-term assets , as applicable .\n- our long-term debt recognized at amortized cost is comprised of our senior notes and our convertible debentures .\n- the fair value of our senior notes is determined using active market prices , and it is therefore classified as level 1 .\n- the fair value of our convertible long-term debt is determined using discounted cash flow models with observable market inputs , and it takes into consideration variables such as interest rate changes , comparable securities , subordination discount , and credit-rating changes , and it is therefore classified as level 2 .\n- the nvidia corporation ( nvidia ) cross-license agreement liability in the preceding table was incurred as a result of entering into a long-term patent cross-license agreement with nvidia in january 2011 .\n\n表格：\n( in millions ) | dec 282013 | dec 292012\navailable-for-sale investments | $ 18086 | $ 14001\ncash | 854 | 593\nequity method investments | 1038 | 992\nloans receivable | 1072 | 979\nnon-marketable cost method investments | 1270 | 1202\nreverse repurchase agreements | 800 | 2850\ntrading assets | 8441 | 5685\ntotal cash and investments | $ 31561 | $ 26302\n\n材料（表格后文本）：\n- in the third quarter of 2013 , we sold our shares in clearwire corporation , which had been accounted for as available-for-sale marketable equity securities , and our interest in clearwire communications , llc ( clearwire llc ) , which had been accounted for as an equity method investment .\n- in total , we received proceeds of $ 470 million on these transactions and recognized a gain of $ 439 million , which is included in gains ( losses ) on equity investments , net on the consolidated statements of income .\n- proceeds received and gains recognized for each investment are included in the \"available-for-sale investments\" and \"equity method investments\" sections that follow .\n- table of contents intel corporation notes to consolidated financial statements ( continued ) .\n\n问题：what percentage of total cash and investments as of dec . 29 2012 was comprised of available-for-sale investments?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。\n关键证据：\n- table_1: ( in millions ) the available-for-sale investments of dec 282013 is $ 18086 ; the available-for-sale investments of dec 292012 is $ 14001 ;\n- table_8: ( in millions ) the total cash and investments of dec 282013 is $ 31561 ; the total cash and investments of dec 292012 is $ 26302 ;\n推理程序：divide(14001, 26302)\n最终答案：0.53232"
+            }
+        ]
+    },
+    {
+        "source_dataset": "FinQA",
+        "task_type": "financial_table_text_reasoning",
+        "record_id": "ETR/2008/page_313.pdf-3",
+        "metadata": {
+            "program": "divide(subtract(959.2, 991.1), 991.1)",
+            "gold_inds": {
+                "table_1": "the 2007 net revenue of amount ( in millions ) is $ 991.1 ;",
+                "table_6": "the 2008 net revenue of amount ( in millions ) is $ 959.2 ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。\n\n材料（表格前文本）：\n- entergy louisiana , llc management's financial discussion and analysis net revenue 2008 compared to 2007 net revenue consists of operating revenues net of : 1 ) fuel , fuel-related expenses , and gas purchased for resale , 2 ) purchased power expenses , and 3 ) other regulatory charges .\n- following is an analysis of the change in net revenue comparing 2008 to 2007 .\n- amount ( in millions ) .\n\n表格：\n | amount ( in millions )\n2007 net revenue | $ 991.1\nretail electric price | -17.1 ( 17.1 )\npurchased power capacity | -12.0 ( 12.0 )\nnet wholesale revenue | -7.4 ( 7.4 )\nother | 4.6\n2008 net revenue | $ 959.2\n\n材料（表格后文本）：\n- the retail electric price variance is primarily due to the cessation of the interim storm recovery through the formula rate plan upon the act 55 financing of storm costs and a credit passed on to customers as a result of the act 55 storm cost financing , partially offset by increases in the formula rate plan effective october 2007 .\n- refer to \"hurricane rita and hurricane katrina\" and \"state and local rate regulation\" below for a discussion of the interim recovery of storm costs , the act 55 storm cost financing , and the formula rate plan filing .\n- the purchased power capacity variance is due to the amortization of deferred capacity costs effective september 2007 as a result of the formula rate plan filing in may 2007 .\n- purchased power capacity costs are offset in base revenues due to a base rate increase implemented to recover incremental deferred and ongoing purchased power capacity charges .\n- see \"state and local rate regulation\" below for a discussion of the formula rate plan filing .\n- the net wholesale revenue variance is primarily due to provisions recorded for potential rate refunds related to the treatment of interruptible load in pricing entergy system affiliate sales .\n\n问题：what is the growth rate in net revenue in 2008?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。\n关键证据：\n- table_1: the 2007 net revenue of amount ( in millions ) is $ 991.1 ;\n- table_6: the 2008 net revenue of amount ( in millions ) is $ 959.2 ;\n推理程序：divide(subtract(959.2, 991.1), 991.1)\n最终答案：-0.03219"
+            }
+        ]
+    },
+    {
+        "source_dataset": "FinQA",
+        "task_type": "financial_table_text_reasoning",
+        "record_id": "C/2010/page_272.pdf-1",
+        "metadata": {
+            "program": "divide(divide(2.5, 1.6), 1.6)",
+            "gold_inds": {
+                "table_1": "in billions of dollars the december 31 2010 of aggregate cost is $ 3.1 ; the december 31 2010 of fair value is $ 2.5 ; the december 31 2010 of level 2 is $ 0.7 ; the december 31 2010 of level 3 is $ 1.8 ;",
+                "table_2": "in billions of dollars the december 31 2009 of aggregate cost is $ 2.5 ; the december 31 2009 of fair value is $ 1.6 ; the december 31 2009 of level 2 is $ 0.3 ; the december 31 2009 of level 3 is $ 1.3 ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。\n\n材料（表格前文本）：\n- the significant changes from december 31 , 2008 to december 31 , 2009 in level 3 assets and liabilities are due to : a net decrease in trading securities of $ 10.8 billion that was driven by : 2022 net transfers of $ 6.5 billion , due mainly to the transfer of debt 2013 securities from level 3 to level 2 due to increased liquidity and pricing transparency ; and net settlements of $ 5.8 billion...\n- the change in net trading derivatives driven by : 2022 a net loss of $ 4.9 billion relating to complex derivative contracts , 2013 such as those linked to credit , equity and commodity exposures .\n- these losses include both realized and unrealized losses during 2009 and are partially offset by gains recognized in instruments that have been classified in levels 1 and 2 ; and net increase in derivative assets of $ 4.3 billion , which includes cash 2013 settlements of derivative contracts in an unrealized loss position , notably those linked to subprime exposures .\n- the decrease in level 3 investments of $ 6.9 billion primarily 2022 resulted from : a reduction of $ 5.0 billion , due mainly to paydowns on debt 2013 securities and sales of private equity investments ; the net transfer of investment securities from level 3 to level 2 2013 of $ 1.5 billion , due to increased availability of observable pricing inputs ; and net losses recognized of $ 0.4 billion...\n- the decrease in securities sold under agreements to repurchase of 2022 $ 9.1 billion is driven by a $ 8.6 billion net transfers from level 3 to level 2 as effective maturity dates on structured repos have shortened .\n- the decrease in long-term debt of $ 1.5 billion is driven mainly by 2022 $ 1.3 billion of net terminations of structured notes .\n\n表格：\nin billions of dollars | aggregate cost | fair value | level 2 | level 3\ndecember 31 2010 | $ 3.1 | $ 2.5 | $ 0.7 | $ 1.8\ndecember 31 2009 | $ 2.5 | $ 1.6 | $ 0.3 | $ 1.3\n\n材料（表格后文本）：\n- .\n\n问题：what was the growth rate of the loans held-for-sale that are carried at locom from 2009 to 2010\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。\n关键证据：\n- table_1: in billions of dollars the december 31 2010 of aggregate cost is $ 3.1 ; the december 31 2010 of fair value is $ 2.5 ; the december 31 2010 of level 2 is $ 0.7 ; the december 31 2010 of level 3 is $ 1.8 ;\n- table_2: in billions of dollars the december 31 2009 of aggregate cost is $ 2.5 ; the december 31 2009 of fair value is $ 1.6 ; the december 31 2009 of level 2 is $ 0.3 ; the december 31 2009 of level 3 is $ 1.3 ;\n推理程序：divide(divide(2.5, 1.6), 1.6)\n最终答案：0.97656"
+            }
+        ]
+    },
+    {
+        "source_dataset": "ConvFinQA",
+        "task_type": "financial_conversational_numerical_reasoning",
+        "record_id": "Single_AAPL/2002/page_23.pdf-1_3",
+        "metadata": {
+            "turn_ind": 3,
+            "cur_type": "program_turn",
+            "program": "divide(subtract(5363, 7983), 7983)",
+            "gold_ind": {
+                "table_1": "the net sales of 2002 is $ 5742 ; the net sales of 2001 is $ 5363 ; the net sales of 2000 is $ 7983 ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融数值推理助手。请结合对话历史、文本材料和表格，进行分步推理并给出最终数值答案。\n\n历史对话：\n- what was the total of net sales in 2001?\n- and what was that in 2000?\n- what was, then, the change in the total of net sales over the year?\n\n材料（表格前文本）：\n- in a new business model such as the retail segment is inherently risky , particularly in light of the significant investment involved , the current economic climate , and the fixed nature of a substantial portion of the retail segment's operating expenses .\n- results for this segment are dependent upon a number of risks and uncertainties , some of which are discussed below under the heading \"factors that may affect future results and financial condition.\" backlog in the company's experience , the actual amount of product backlog at any particular time is not a meaningful indication of its future business prospects .\n- in particular , backlog often increases in anticipation of or immediately following new product introductions because of over- ordering by dealers anticipating shortages .\n- backlog often is reduced once dealers and customers believe they can obtain sufficient supply .\n- because of the foregoing , backlog cannot be considered a reliable indicator of the company's ability to achieve any particular level of revenue or financial performance .\n- further information regarding the company's backlog may be found below under the heading \"factors that may affect future results and financial condition.\" gross margin gross margin for the three fiscal years ended september 28 , 2002 are as follows ( in millions , except gross margin percentages ) : gross margin increased to 28% ( 28 % ) of net sales in 2002 from 23% ( 23 % ) in 2001 .\n\n表格：\n | 2002 | 2001 | 2000\nnet sales | $ 5742 | $ 5363 | $ 7983\ncost of sales | 4139 | 4128 | 5817\ngross margin | $ 1603 | $ 1235 | $ 2166\ngross margin percentage | 28% ( 28 % ) | 23% ( 23 % ) | 27% ( 27 % )\n\n材料（表格后文本）：\n- .\n\n当前问题：what was the percentage change in net sales from 2000 to 2001?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：需要结合当前问题、历史对话和财务材料定位指标后再做数值计算。\n关键证据：\n- table_1: the net sales of 2002 is $ 5742 ; the net sales of 2001 is $ 5363 ; the net sales of 2000 is $ 7983 ;\n推理程序：divide(subtract(5363, 7983), 7983)\n最终答案：-32%"
+            }
+        ]
+    },
+    {
+        "source_dataset": "ConvFinQA",
+        "task_type": "financial_conversational_numerical_reasoning",
+        "record_id": "Single_JPM/2013/page_104.pdf-2_2",
+        "metadata": {
+            "turn_ind": 2,
+            "cur_type": "program_turn",
+            "program": "divide(subtract(3.7, 3.2), 3.2)",
+            "gold_ind": {
+                "text_14": "the current year included expense of $ 3.7 billion for additional litigation reserves , largely for mortgage-related matters .",
+                "text_15": "the prior year included expense of $ 3.2 billion for additional litigation reserves ."
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融数值推理助手。请结合对话历史、文本材料和表格，进行分步推理并给出最终数值答案。\n\n历史对话：\n- what was the net change in value of litigation reserves during 2012?\n- what was the value of litigation reserves at the start of 2012?\n\n材料（表格前文本）：\n- management 2019s discussion and analysis 110 jpmorgan chase & co./2013 annual report 2012 compared with 2011 net loss was $ 2.0 billion , compared with a net income of $ 919 million in the prior year .\n- private equity reported net income of $ 292 million , compared with net income of $ 391 million in the prior year .\n- net revenue was $ 601 million , compared with $ 836 million in the prior year , due to lower unrealized and realized gains on private investments , partially offset by higher unrealized gains on public securities .\n- noninterest expense was $ 145 million , down from $ 238 million in the prior year .\n- treasury and cio reported a net loss of $ 2.1 billion , compared with net income of $ 1.3 billion in the prior year .\n- net revenue was a loss of $ 3.1 billion , compared with net revenue of $ 3.2 billion in the prior year .\n\n表格：\nas of or for the year ended december 31 ( in millions ) | 2013 | 2012 | 2011\nsecurities gains | $ 659 | $ 2028 | $ 1385\ninvestment securities portfolio ( average ) | 353712 | 358029 | 330885\ninvestment securities portfolio ( period 2013end ) ( a ) | 347562 | 365421 | 355605\nmortgage loans ( average ) | 5145 | 10241 | 13006\nmortgage loans ( period-end ) | 3779 | 7037 | 13375\n\n材料（表格后文本）：\n- ( a ) period-end investment securities included held-to-maturity balance of $ 24.0 billion at december 31 , 2013 .\n- held-to-maturity balances for the other periods were not material. .\n\n当前问题：what was the percentage increase in litigation reserves in 2012?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：需要结合当前问题、历史对话和财务材料定位指标后再做数值计算。\n关键证据：\n- text_14: the current year included expense of $ 3.7 billion for additional litigation reserves , largely for mortgage-related matters .\n- text_15: the prior year included expense of $ 3.2 billion for additional litigation reserves .\n推理程序：divide(subtract(3.7, 3.2), 3.2)\n最终答案：15.6%"
+            }
+        ]
+    },
+    {
+        "source_dataset": "ConvFinQA",
+        "task_type": "financial_conversational_numerical_reasoning",
+        "record_id": "Single_HIG/2004/page_122.pdf-2_3",
+        "metadata": {
+            "turn_ind": 3,
+            "cur_type": "program_turn",
+            "program": "divide(add(27729, 45161), 317105)",
+            "gold_ind": {
+                "table_7": "the total of total is $ 317105 ; the total of less than 1 year is $ 27729 ; the total of 1-3 years is $ 45161 ; the total of 3-5 years is $ 45112 ; the total of more than 5 years is $ 199103 ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融数值推理助手。请结合对话历史、文本材料和表格，进行分步推理并给出最终数值答案。\n\n历史对话：\n- what is the value of obligations due within 1 year?\n- what is the amount due between 1-3 years?\n- what is the sum?\n\n材料（表格前文本）：\n- the following table identifies the company 2019s aggregate contractual obligations due by payment period : payments due by period .\n\n表格：\n | total | less than 1 year | 1-3 years | 3-5 years | more than 5 years\nproperty and casualty obligations [1] | $ 21885 | $ 5777 | $ 6150 | $ 3016 | $ 6942\nlife annuity and disability obligations [2] | 281998 | 18037 | 37318 | 40255 | 186388\nlong-term debt obligations [3] | 9093 | 536 | 1288 | 1613 | 5656\noperating lease obligations | 723 | 175 | 285 | 162 | 101\npurchase obligations [4] [5] | 1764 | 1614 | 120 | 14 | 16\nother long-term liabilities reflected onthe balance sheet [6] [7] | 1642 | 1590 | 2014 | 52 | 2014\ntotal | $ 317105 | $ 27729 | $ 45161 | $ 45112 | $ 199103\n\n材料（表格后文本）：\n- [1] the following points are significant to understanding the cash flows estimated for obligations under property and casualty contracts : reserves for property & casualty unpaid claim and claim adjustment expenses include case reserves for reported claims and reserves for claims incurred but not reported ( ibnr ) .\n- while payments due on claim reserves are considered contractual obligations because they relate to insurance policies issued by the company , the ultimate amount to be paid to settle both case reserves and ibnr is an estimate , subject to significant uncertainty .\n- the actual amount to be paid is not determined until the company reaches a settlement with the claimant .\n- final claim settlements may vary significantly from the present estimates , particularly since many claims will not be settled until well into the future .\n- in estimating the timing of future payments by year , the company has assumed that its historical payment patterns will continue .\n- however , the actual timing of future payments will likely vary materially from these estimates due to , among other things , changes in claim reporting and payment patterns and large unanticipated settlements .\n\n当前问题：what portion of total obligations are due within the next 3 years?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：需要结合当前问题、历史对话和财务材料定位指标后再做数值计算。\n关键证据：\n- table_7: the total of total is $ 317105 ; the total of less than 1 year is $ 27729 ; the total of 1-3 years is $ 45161 ; the total of 3-5 years is $ 45112 ; the total of more than 5 years is $ 199103 ;\n推理程序：divide(add(27729, 45161), 317105)\n最终答案：22.99%"
+            }
+        ]
+    },
+    {
+        "source_dataset": "ConvFinQA",
+        "task_type": "financial_conversational_numerical_reasoning",
+        "record_id": "Single_ETR/2008/page_336.pdf-3_1",
+        "metadata": {
+            "turn_ind": 1,
+            "cur_type": "program_turn",
+            "program": "divide(subtract(498.8, 486.9), 486.9)",
+            "gold_ind": {
+                "table_1": "the 2007 net revenue of amount ( in millions ) is $ 486.9 ;",
+                "table_8": "the 2008 net revenue of amount ( in millions ) is $ 498.8 ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融数值推理助手。请结合对话历史、文本材料和表格，进行分步推理并给出最终数值答案。\n\n历史对话：\n- what is the difference between the net revenue of 2008 and 2007?\n\n材料（表格前文本）：\n- entergy mississippi , inc .\n- management's financial discussion and analysis results of operations net income 2008 compared to 2007 net income decreased $ 12.4 million primarily due to higher other operation and maintenance expenses , lower other income , and higher depreciation and amortization expenses , partially offset by higher net revenue .\n- 2007 compared to 2006 net income increased $ 19.8 million primarily due to higher net revenue , lower other operation and maintenance expenses , higher other income , and lower interest expense , partially offset by higher depreciation and amortization expenses .\n- net revenue 2008 compared to 2007 net revenue consists of operating revenues net of : 1 ) fuel , fuel-related expenses , and gas purchased for resale , 2 ) purchased power expenses , and 3 ) other regulatory charges .\n- following is an analysis of the change in net revenue comparing 2008 to 2007 .\n- amount ( in millions ) .\n\n表格：\n | amount ( in millions )\n2007 net revenue | $ 486.9\nattala costs | 9.9\nrider revenue | 6.0\nbase revenue | 5.1\nreserve equalization | -2.4 ( 2.4 )\nnet wholesale revenue | -4.0 ( 4.0 )\nother | -2.7 ( 2.7 )\n2008 net revenue | $ 498.8\n\n材料（表格后文本）：\n- the attala costs variance is primarily due to an increase in the attala power plant costs that are recovered through the power management rider .\n- the net income effect of this recovery in limited to a portion representing an allowed return on equity with the remainder offset by attala power plant costs in other operation and maintenance expenses , depreciation expenses , and taxes other than income taxes .\n- the recovery of attala power plant costs is discussed further in \"liquidity and capital resources - uses of capital\" below .\n- the rider revenue variance is the result of a storm damage rider that became effective in october 2007 .\n- the establishment of this rider results in an increase in rider revenue and a corresponding increase in other operation and maintenance expense for the storm reserve with no effect on net income .\n- the base revenue variance is primarily due to a formula rate plan increase effective july 2007 .\n\n当前问题：what is the percent change in net revenue between 2007 and 2008?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：需要结合当前问题、历史对话和财务材料定位指标后再做数值计算。\n关键证据：\n- table_1: the 2007 net revenue of amount ( in millions ) is $ 486.9 ;\n- table_8: the 2008 net revenue of amount ( in millions ) is $ 498.8 ;\n推理程序：divide(subtract(498.8, 486.9), 486.9)\n最终答案：2.4%"
+            }
+        ]
+    },
+    {
+        "source_dataset": "ConvFinQA",
+        "task_type": "financial_conversational_numerical_reasoning",
+        "record_id": "Single_AMT/2002/page_104.pdf-2_1",
+        "metadata": {
+            "turn_ind": 1,
+            "cur_type": "program_turn",
+            "program": "add(add(268496, 131262), 195082)",
+            "gold_ind": {
+                "table_1": "2003 the 2004 of $ 268496 is 131262 ;",
+                "table_2": "2003 the 2005 of $ 268496 is 195082 ;"
+            }
+        },
+        "conversations": [
+            {
+                "from": "human",
+                "value": "你是一名金融数值推理助手。请结合对话历史、文本材料和表格，进行分步推理并给出最终数值答案。\n\n历史对话：\n- what is the sum value of expected payments for principal of long-term debt in 2003 and 2004?\n\n材料（表格前文本）：\n- american tower corporation and subsidiaries notes to consolidated financial statements 2014 ( continued ) 19 .\n- subsequent events 12.25% ( 12.25 % ) senior subordinated discount notes and warrants offering 2014in january 2003 , the company issued 808000 units , each consisting of ( 1 ) $ 1000 principal amount at maturity of the 12.25% ( 12.25 % ) senior subordinated discount notes due 2008 of a wholly owned subsidiary of the company ( ati notes ) and ( 2 ) a warrant to purchase 14.0953 shares of class a...\n- the gross offering proceeds were allocated between the ati notes ( $ 367.4 million ) and the fair value of the warrants ( $ 52.6 million ) .\n- net proceeds from the offering aggregated approximately $ 397.0 million and were or will be used for the purposes described below under amended and restated loan agreement .\n- the ati notes accrue no cash interest .\n- instead , the accreted value of each ati note will increase between the date of original issuance and maturity ( august 1 , 2008 ) at a rate of 12.25% ( 12.25 % ) per annum .\n\n表格：\n2003 | $ 268496\n2004 | 131262\n2005 | 195082\n2006 | 538479\n2007 | 1065437\nthereafter | 1408783\ntotal | $ 3607539\n\n材料（表格后文本）：\n- .\n\n当前问题：what is the total expected payments for principal of long- term debt , including capital leases in the next 36 months?\n\n请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：..."
+            },
+            {
+                "from": "gpt",
+                "value": "问题分析：需要结合当前问题、历史对话和财务材料定位指标后再做数值计算。\n关键证据：\n- table_1: 2003 the 2004 of $ 268496 is 131262 ;\n- table_2: 2003 the 2005 of $ 268496 is 195082 ;\n推理程序：add(add(268496, 131262), 195082)\n最终答案：594840"
+            }
+        ]
+    }
+]

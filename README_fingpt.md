@@ -12,8 +12,9 @@
 
 | 阶段       | 数据                            | 目标            | 说明               |
 | -------- | ----------------------------- | ------------- | ---------------- |
-| SFT-1    | ConvFinQA + FinQA             | 学会金融对话数值推理    | 主训练阶段            |
-| SFT-2    | + fingpt-fineval + 少量 fiqa_qa | 中文知识/稳定性补强    | 补金融知识和中文表达       |
+| SFT-1    | FinQA                        | 学会表文混合数值推理    | 第一阶段            |
+| SFT-2    | ConvFinQA                    | 学会多轮 follow-up 推理 | 第二阶段            |
+| Joint SFT | FinQA + ConvFinQA            | 作为对照基线            | 需在 SFT v2 数据上重跑 |
 | DPO（可选）  | 从 SFT 样本自动构造                  | 优化表达质量、结构、少废话 | 小规模就够            |
 | GRPO（推荐） | 基于可验证 reward                  | 优化答案正确性和推理格式  | 更贴合 reason model |
 
@@ -37,15 +38,11 @@ https://finqasite.github.io/ https://github.com/czyssrs/FinQA
 
 选择
 
-FinQA：测 表文混合 + 多步数值推理
-
-ConvFinQA：测 多轮上下文 + follow-up 金融推理
-
-CFLUE：推荐做，但只选和你任务最相关的子任务，不要全做。
-
-它的作用不是测“金融数值推理”，而是测：中文金融语义理解；中文金融术语/文本泛化；模型是否只会英文表格推理，而不会中文金融表达。
-
-所以它应该作为：“中文金融泛化补充 benchmark”
+1. FinQA：测 表文混合 + 多步数值推理
+2. ConvFinQA：测 多轮上下文 + follow-up 金融推理
+3. CFLUE：推荐做，但只选和任务最相关的子任务，不要全做。
+     - 它的作用不是测“金融数值推理”，而是测：中文金融语义理解；中文金融术语/文本泛化；模型是否只会英文表格推理，而不会中文金融表达。
+     - 所以它应该作为：“中文金融泛化补充 benchmark”
 
 参考
 
@@ -91,12 +88,12 @@ https://huggingface.co/datasets/AdaptLLM/finance-tasks
 
 SFT1（FinQA）：
 - raw: `6251`
-- clean 后: `4683`（剔除过长轮次 `1568`）
+- clean 后: `4683`（**剔除过长轮次 `1568`**）
 - strict 后: `3954`（审计标记 `729`，全部剔除）
 
 SFT2（ConvFinQA turn）：
 - raw: `2096`
-- clean 后: `1407`（剔除过长轮次 `689`）
+- clean 后: `1407`（**剔除过长轮次 `689`**）
 - strict 后: `1015`（审计标记 `392`，全部剔除）
 
 清洗阈值（与 notebook 一致）：
@@ -114,9 +111,21 @@ SFT2（ConvFinQA turn）：
 
 解决：启用 `clean -> audit -> strict filter` 三段清洗，训练集统一使用 `*_clean_strict.jsonl`。
 
-## SFT 分阶段训练 vs 混合训练
+补充：SFT v2 还新增了数据审计要求，在训练前检查：
+- `json_like_evidence_ratio`
+- `structured_answer_ratio`
+- `avg_prompt_chars` / `avg_answer_chars`
+- 样本 preview 中是否仍残留原始 JSON 证据块
 
-notebook 给出的结论是：本任务最终采用混合训练（joint training）方案，并在训练前对混合样本进行打乱，避免同源样本聚集。
+## SFT v2 设计变更
+
+当前不再直接沿用旧版 joint training 结论。最新 benchmark 显示旧版 `sft_merged` 弱于 `base`，说明训练 loss 更低不等于推理效果更好。
+
+SFT v2 的核心变更是：
+- `关键证据` 不再直接监督原始 `gold_ind/gold_inds` JSON
+- `FinQA` / `ConvFinQA` 的 evidence 改为自然语言摘要 bullet
+- `ConvFinQA` 历史问题先压缩，再进入 prompt
+- 修改 processor 后，必须重新生成 `*_clean_strict.jsonl` 再启动训练
 
 # Done：DPO（轻量）
 

@@ -8,8 +8,8 @@ from typing import Any, Dict, Optional
 from ..common import (
     build_context_sections,
     extract_numeric_text,
-    normalize_text_blocks,
     safe_jsonable,
+    summarize_evidence_blocks,
     to_text,
 )
 
@@ -28,7 +28,7 @@ def build_sft_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
         return None
 
     gold_inds = qa.get("gold_inds") or rec.get("gold_inds") or []
-    supporting = normalize_text_blocks(gold_inds, args.max_supporting_facts, args.max_context_chars)
+    supporting = summarize_evidence_blocks(gold_inds, args.max_supporting_facts, args.max_context_chars)
 
     prompt_parts = [
         "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。",
@@ -38,13 +38,13 @@ def build_sft_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
     prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
 
     answer_lines = [
-        "问题分析：需要从财报文本和表格中定位相关指标，并依据程序完成数值计算。",
+        "问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。",
         "关键证据：",
     ]
     if supporting:
         answer_lines.extend([f"- {fact}" for fact in supporting])
     else:
-        answer_lines.append("- 需要使用题目涉及的表格行列和相关文本说明。")
+        answer_lines.append("- 需要从题目相关的表格行、文本说明和财务指标中提取关键数值。")
     answer_lines.append(f"推理程序：{program or '请根据题意构造数值推理程序。'}")
     answer_lines.append(f"最终答案：{extract_numeric_text(final_answer)}")
 
@@ -72,7 +72,6 @@ def _mutate_numeric_answer(text: str) -> str:
             token = match.group(0).replace(",", "")
             try:
                 value = float(token)
-                # stronger numeric perturbation than +/-1 to form harder negatives
                 step = max(abs(value) * 0.12, 1.0)
                 mutated = value + step if value >= 0 else value - step
                 replacement = str(int(mutated)) if float(mutated).is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
@@ -169,7 +168,6 @@ def _mutate_analysis_section(text: str) -> str:
 
 def _build_high_confusion_rejected(chosen: str) -> str:
     rejected = chosen
-    # multi-dimensional perturbation: reasoning program + grounding + final value
     rejected = _mutate_analysis_section(rejected)
     rejected = _mutate_evidence_section(rejected)
     rejected = _mutate_program_section(rejected)

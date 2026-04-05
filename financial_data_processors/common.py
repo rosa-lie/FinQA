@@ -55,6 +55,57 @@ def normalize_text_blocks(value: Any, max_items: int, max_chars: int) -> List[st
     return out
 
 
+def _flatten_text_values(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (int, float, bool)):
+        return [str(value).strip()]
+    if isinstance(value, list):
+        out: List[str] = []
+        for item in value:
+            out.extend(_flatten_text_values(item))
+        return out
+    if isinstance(value, dict):
+        out: List[str] = []
+        for key, item in value.items():
+            key_text = str(key).strip().lower()
+            item_values = _flatten_text_values(item)
+            if key_text and key_text not in {"text", "value", "content", "sentence", "evidence"}:
+                item_values = [f"{key}: {text}" for text in item_values]
+            out.extend(item_values)
+        return out
+    return [str(value).strip()]
+
+
+def summarize_evidence_blocks(value: Any, max_items: int, max_chars: int) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for raw in _flatten_text_values(value):
+        text = " ".join(raw.replace("\n", " ").split())
+        if not text:
+            continue
+        normalized = text.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(truncate_text(text, max_chars))
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def summarize_history_questions(questions: List[str], max_turns: int, max_chars: int) -> List[str]:
+    out: List[str] = []
+    for question in questions[-max_turns:]:
+        text = " ".join(to_text(question).split())
+        if text:
+            out.append(truncate_text(text, max_chars))
+    return out
+
+
 def format_table(table: Any, max_rows: int, max_cols: int, max_cell_chars: int) -> str:
     if not isinstance(table, list) or not table:
         return ""

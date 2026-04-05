@@ -20,6 +20,8 @@ from datasets import load_dataset
 from peft import PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, GenerationConfig
+from financial_data_processors.common import iter_records
+from financial_data_processors.families import FAMILY_MODULES
 
 
 OPTION_RE = re.compile(r"\b([A-F])\b", re.IGNORECASE)
@@ -73,6 +75,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fineval_dataset_name", type=str, default="FinGPT/fingpt-fineval")
     parser.add_argument("--fineval_split", type=str, default="test")
     parser.add_argument("--fineval_local_file", type=str, default="")
+    parser.add_argument(
+        "--run_fineval",
+        action="store_true",
+        help="Enable Fineval benchmark loading. Disabled by default to avoid unintended Hub requests.",
+    )
     parser.add_argument("--fineval_max_samples", type=int, default=0)
     parser.add_argument(
         "--cflue_task_file",
@@ -162,11 +169,14 @@ def build_context_sections(record: Dict[str, Any], args: SimpleNamespace) -> Lis
     return sections
 
 
-PROMPT_ARGS = SimpleNamespace(
-    max_context_items=8,
-    max_context_chars=500,
-    max_history_turns=8,
-    max_supporting_facts=8,
+PROCESSOR_ARGS = SimpleNamespace(
+    max_history_turns=6,
+    max_context_items=6,
+    max_context_chars=400,
+    max_supporting_facts=6,
+    max_table_rows=20,
+    max_table_cols=12,
+    max_cell_chars=80,
 )
 
 
@@ -184,86 +194,78 @@ def load_json_records(path: Path) -> List[Dict[str, Any]]:
 
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, list):
-        return data
+        return [dict(row) for row in data]
     if isinstance(data, dict):
         for key in ["data", "records", "examples", "items"]:
             if isinstance(data.get(key), list):
-                return data[key]
+                return [dict(row) for row in data[key]]
     raise ValueError(f"Unsupported file format for {path}")
 
 
-def limit_records(records: List[Dict[str, Any]], max_samples: int) -> List[Dict[str, Any]]:
+def limit_records(records: List[Any], max_samples: int) -> List[Any]:
     if max_samples and max_samples > 0:
         return records[:max_samples]
     return records
 
 
-def build_convfinqa_prompt(record: Dict[str, Any]) -> BenchmarkExample:
-    qa = record.get("qa") if isinstance(record.get("qa"), dict) else {}
-    annotation = record.get("annotation") if isinstance(record.get("annotation"), dict) else {}
-    history = record.get("cur_dial") if isinstance(record.get("cur_dial"), list) else []
-    if not history:
-        history = annotation.get("cur_dial") if isinstance(annotation.get("cur_dial"), list) else []
+def extract_final_answer(text: str) -> str:
+    match = FINAL_ANSWER_RE.search(text or "")
+    if match:
+        return match.group(1).strip().split("\n")[0].strip()
+    return (text or "").strip()
 
-    question = to_text(qa.get("question") or (history[-1] if history else None))
-    previous_turns = [to_text(item) for item in history[:-1] if to_text(item)]
-    gold_answer = to_text(qa.get("answer") or qa.get("exe_ans") or record.get("exe_ans") or record.get("answer"))
-    gold_program = to_text(
-        record.get("cur_program")
-        or qa.get("program_re")
-        or qa.get("program")
-        or annotation.get("cur_program")
-        or record.get("program")
-    )
-    prompt_parts = [
-        "你是一名金融数值推理助手。请结合历史对话、文本材料和表格，进行分步推理并给出最终答案。",
-    ]
-    if previous_turns:
-        prompt_parts.append("历史对话：\n" + "\n".join(f"- {item}" for item in previous_turns[-PROMPT_ARGS.max_history_turns:]))
-    prompt_parts.extend(build_context_sections(record, PROMPT_ARGS))
-    prompt_parts.append(f"当前问题：{question}")
-    prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
+
+def build_numeric_example_from_processor(record: Dict[str, Any], family: str, task_name: str) -> Optional[BenchmarkExample]:
+    module = FAMILY_MODULES[family]
+    item = module.build_sft_item(record, PROCESSOR_ARGS)
+    if item is None:
+        return None
+    conversations = item.get("conversations") or []
+    if len(conversations) < 2:
+        return None
+    prompt = to_text(conversations[0].get("value"))
+    chosen = to_text(conversations[1].get("value"))
+    gold_answer = extract_final_answer(chosen)
+    metadata = dict(item.get("metadata") or {})
+    metadata.setdefault("source_dataset", item.get("source_dataset", family))
+    gold_program = to_text(metadata.get("program"))
+    if not prompt or not gold_answer:
+        return None
     return BenchmarkExample(
-        task_name="convfinqa_test",
-        prompt="\n\n".join(prompt_parts),
+        task_name=task_name,
+        prompt=prompt,
         gold_answer=gold_answer,
         answer_type="numeric",
-        record_id=to_text(record.get("id") or qa.get("id") or record.get("filename")),
-        metadata={"turn_ind": record.get("turn_ind", annotation.get("turn_ind"))},
+        record_id=to_text(item.get("record_id") or record.get("id") or record.get("filename")),
+        metadata=metadata,
         gold_program=gold_program,
     )
 
 
-def build_finqa_prompt(record: Dict[str, Any]) -> BenchmarkExample:
-    qa = record.get("qa") if isinstance(record.get("qa"), dict) else record
-    question = to_text(qa.get("question") or record.get("question"))
-    gold_answer = to_text(qa.get("exe_ans") or record.get("exe_ans") or qa.get("answer") or record.get("answer"))
-    gold_program = to_text(qa.get("program_re") or qa.get("program") or record.get("program_re") or record.get("program"))
-
-    prompt_parts = [
-        "你是一名金融表文混合推理助手。请结合文本、表格和问题，进行分步推理并给出最终答案。",
-    ]
-    prompt_parts.extend(build_context_sections(record, PROMPT_ARGS))
-    prompt_parts.append(f"问题：{question}")
-    prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
-
-    return BenchmarkExample(
-        task_name="finqa_test",
-        prompt="\n\n".join(prompt_parts),
-        gold_answer=gold_answer,
-        answer_type="numeric",
-        record_id=to_text(record.get("id") or qa.get("id") or record.get("filename")),
-        metadata={},
-        gold_program=gold_program,
-    )
+def load_numeric_examples(test_file: str, family: str, task_name: str, max_samples: int) -> List[BenchmarkExample]:
+    if not test_file:
+        return []
+    records = [dict(row) for row in iter_records(load_json_records(Path(test_file)))]
+    if family == "convfinqa_turn":
+        records, dedupe_stats = FAMILY_MODULES[family].dedupe_final_turn(records)
+        dropped = dedupe_stats.get("dedup_dropped_rows", 0)
+        if dropped:
+            print(f"[prep] {family}: dedup dropped {dropped} rows before evaluation")
+    examples: List[BenchmarkExample] = []
+    build_skipped = 0
+    for record in records:
+        example = build_numeric_example_from_processor(record, family, task_name)
+        if example is None:
+            build_skipped += 1
+            continue
+        examples.append(example)
+    if build_skipped:
+        print(f"[prep] {family}: skipped {build_skipped} rows during benchmark example build")
+    return limit_records(examples, max_samples)
 
 
 def load_finqa_examples(test_file: str, max_samples: int) -> List[BenchmarkExample]:
-    if not test_file:
-        return []
-    records = limit_records(load_json_records(Path(test_file)), max_samples)
-    return [build_finqa_prompt(record) for record in records]
-
+    return load_numeric_examples(test_file, family="finqa", task_name="finqa_test", max_samples=max_samples)
 
 def combine_instruction_input(record: Dict[str, Any]) -> str:
     parts = [
@@ -354,11 +356,7 @@ def build_mcq_example(record: Dict[str, Any], task_name: str, source_name: str) 
 
 
 def load_convfinqa_examples(test_file: str, max_samples: int) -> List[BenchmarkExample]:
-    if not test_file:
-        return []
-    records = limit_records(load_json_records(Path(test_file)), max_samples)
-    return [build_convfinqa_prompt(record) for record in records]
-
+    return load_numeric_examples(test_file, family="convfinqa_turn", task_name="convfinqa_test", max_samples=max_samples)
 
 def load_fineval_examples(dataset_name: str, split: str, local_file: str, max_samples: int) -> List[BenchmarkExample]:
     if local_file:
@@ -632,9 +630,18 @@ def main() -> None:
     benchmark_examples: List[BenchmarkExample] = []
     benchmark_examples.extend(load_convfinqa_examples(args.convfinqa_test_file, args.convfinqa_max_samples))
     benchmark_examples.extend(load_finqa_examples(args.finqa_test_file, args.finqa_max_samples))
-    benchmark_examples.extend(
-        load_fineval_examples(args.fineval_dataset_name, args.fineval_split, args.fineval_local_file, args.fineval_max_samples)
-    )
+    run_fineval = bool(args.run_fineval or args.fineval_local_file)
+    if run_fineval:
+        benchmark_examples.extend(
+            load_fineval_examples(
+                args.fineval_dataset_name,
+                args.fineval_split,
+                args.fineval_local_file,
+                args.fineval_max_samples,
+            )
+        )
+    else:
+        print("[skip] Fineval disabled (use --run_fineval or set --fineval_local_file to enable).")
     cflue_task_files = parse_name_path_entries(args.cflue_task_file)
     benchmark_examples.extend(load_cflue_examples(cflue_task_files, args.cflue_max_samples_per_task))
 
@@ -649,6 +656,7 @@ def main() -> None:
         "finqa_test_file": args.finqa_test_file,
         "fineval_dataset_name": args.fineval_dataset_name,
         "fineval_split": args.fineval_split,
+        "run_fineval": run_fineval,
         "fineval_local_file": args.fineval_local_file,
         "cflue_task_files": cflue_task_files,
         "num_examples": len(benchmark_examples),
