@@ -2,6 +2,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import argparse
 import json
 import subprocess
@@ -30,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--enable_reasoning_judge', action='store_true')
     parser.add_argument('--judge_provider', type=str, default='deepseek')
     parser.add_argument('--judge_model', type=str, default='deepseek-chat')
-    parser.add_argument('--judge_prompt_file', type=str, default='prompts/financial_reasoning_judge.txt')
+    parser.add_argument('--judge_prompt_file', type=str, default='distill/prompts/financial_reasoning_judge.txt')
     parser.add_argument('--summary_csv', action='store_true')
     return parser.parse_args()
 
@@ -48,14 +55,14 @@ def main() -> None:
     summary_file = work_dir / 'distill_summary.jsonl'
     summary_csv_file = work_dir / 'distill_summary.csv'
 
-    build_cmd = [sys.executable, 'build_financial_distill_dataset.py', '--output_file', str(input_file), '--max_samples_per_family', str(args.max_samples_per_family), '--convfinqa_keep_final_only', str(args.convfinqa_keep_final_only)]
+    build_cmd = [sys.executable, 'distill/build_financial_distill_dataset.py', '--output_file', str(input_file), '--max_samples_per_family', str(args.max_samples_per_family), '--convfinqa_keep_final_only', str(args.convfinqa_keep_final_only)]
     for spec in args.source_spec:
         build_cmd.extend(['--source_spec', spec])
     run_command(build_cmd)
 
     teacher_cmd = [
         sys.executable,
-        'distill_with_teacher.py',
+        'distill/distill_with_teacher.py',
         '--input_file', str(input_file),
         '--output_file', str(candidates_file),
         '--backend', args.teacher_backend,
@@ -71,7 +78,7 @@ def main() -> None:
 
     score_cmd = [
         sys.executable,
-        'score_distill_candidates.py',
+        'distill/score_distill_candidates.py',
         '--input_file', str(candidates_file),
         '--audit_output_file', str(audit_file),
         '--sft_output_file', str(sft_file),

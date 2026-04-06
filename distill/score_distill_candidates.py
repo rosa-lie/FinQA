@@ -2,6 +2,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import argparse
 import csv
 import json
@@ -10,8 +17,10 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?%?")
 JSON_LIKE_RE = re.compile(r'\{\s*"(?:text|table|value|content|sentence|evidence|gold_ind|gold_inds)')
 STRUCTURED_ANCHORS = ["问题分析：", "关键证据：", "推理程序：", "最终答案："]
@@ -24,7 +33,7 @@ RUBRIC_FIELDS = [
     "reasoning_completeness",
     "content_diversity",
 ]
-DEFAULT_JUDGE_PROMPT = Path("prompts/financial_reasoning_judge.txt")
+DEFAULT_JUDGE_PROMPT = Path("distill/prompts/financial_reasoning_judge.txt")
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -54,6 +63,15 @@ def save_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+
+
+def extract_answer_body(text: str) -> str:
+    tag_match = ANSWER_TAG_RE.search(text or "")
+    if tag_match:
+        return tag_match.group(1).strip()
+    return text or ""
+
+
 def extract_section(text: str, pattern: re.Pattern[str]) -> str:
     match = pattern.search(text or "")
     if not match:
@@ -77,7 +95,7 @@ def parse_number(text: str) -> Optional[float]:
     if not text:
         return None
     final_section = extract_section(text, FINAL_ANSWER_RE) or text
-    matches = NUMBER_RE.findall(final_section.replace("，", ","))
+    matches = NUMBER_RE.findall(extract_answer_body(final_section).replace("，", ","))
     if not matches:
         return None
     token = matches[-1].replace(",", "").strip()
@@ -131,7 +149,8 @@ def operator_sequence(program_text: str) -> List[str]:
 
 def build_answer_check(row: Dict[str, Any], abs_tol: float, rel_tol: float) -> Dict[str, Any]:
     response = str(row.get("response") or "").strip()
-    final_answer = extract_section(response, FINAL_ANSWER_RE)
+    answer_text = extract_answer_body(response)
+    final_answer = extract_section(answer_text, FINAL_ANSWER_RE) or extract_answer_body(response).strip().split("\n")[0].strip()
     program_section = extract_section(response, PROGRAM_RE)
     structured = all(anchor in response for anchor in STRUCTURED_ANCHORS)
     ans_ok = answer_correct(response, str(row.get("gold_answer") or ""), abs_tol, rel_tol)

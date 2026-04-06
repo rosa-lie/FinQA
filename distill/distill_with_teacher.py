@@ -2,6 +2,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import argparse
 import hashlib
 import json
@@ -11,12 +18,41 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是一名金融数值推理教师模型。"
-    "请严格按照以下结构输出，不要省略标题，不要输出 JSON，不要添加额外说明。\n\n"
+    "请严格使用 <think> 和 <answer> 标签输出，不要输出 JSON，不要添加额外说明。\n\n"
+    "<think>\n"
     "问题分析：...\n"
     "关键证据：\n- ...\n"
     "推理程序：...\n"
-    "最终答案：..."
+    "</think>\n"
+    "<answer>\n"
+    "最终答案：...\n"
+    "</answer>"
 )
+
+
+
+
+def wrap_structured_response(response_text: str) -> str:
+    text = (response_text or "").strip()
+    if not text:
+        return text
+    if "<think>" in text and "<answer>" in text:
+        return text
+    lines = text.splitlines()
+    answer_start = None
+    for i, line in enumerate(lines):
+        if line.startswith("最终答案："):
+            answer_start = i
+            break
+    if answer_start is None:
+        think_body = text
+        answer_body = "最终答案：信息不足，暂不作答。"
+    else:
+        think_body = "\n".join(lines[:answer_start]).strip()
+        answer_body = "\n".join(lines[answer_start:]).strip()
+    think_body = think_body or "问题分析：请根据题意完成推理。\n关键证据：\n- 请结合材料提取关键证据。\n推理程序：请依据材料逐步完成数值计算。"
+    answer_body = answer_body or "最终答案：信息不足，暂不作答。"
+    return f"<think>\n{think_body}\n</think>\n<answer>\n{answer_body}\n</answer>"
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -97,7 +133,7 @@ def generate_with_openai(client: Any, model_name: str, messages: Sequence[Dict[s
 
 def generate_candidate(row: Dict[str, Any], args: argparse.Namespace, system_prompt: str, user_template_text: str, temperature: float, client_bundle: Optional[Tuple[Any, str]]) -> Tuple[str, Dict[str, Any]]:
     if args.backend == "gold":
-        return str(row.get("gold_response") or "").strip(), {"backend": "gold"}
+        return wrap_structured_response(str(row.get("gold_response") or "").strip()), {"backend": "gold"}
     if args.backend == "copy_gold_final":
         gold_answer = str(row.get("gold_answer") or "").strip()
         content = "\n".join([
@@ -107,12 +143,13 @@ def generate_candidate(row: Dict[str, Any], args: argparse.Namespace, system_pro
             f"推理程序：{str(row.get('gold_program') or '请依据材料逐步完成数值计算。').strip()}",
             f"最终答案：{gold_answer}",
         ])
-        return content, {"backend": "copy_gold_final"}
+        return wrap_structured_response(content), {"backend": "copy_gold_final"}
     if client_bundle is None:
         raise ValueError("OpenAI-compatible backend requires a valid client.")
     client, model_name = client_bundle
     messages = build_messages(system_prompt, str(row.get("prompt") or ""), user_template_text)
-    return generate_with_openai(client, model_name, messages, temperature, args.max_tokens, args.top_p)
+    response_text, raw = generate_with_openai(client, model_name, messages, temperature, args.max_tokens, args.top_p)
+    return wrap_structured_response(response_text), raw
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,7 +163,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--system_prompt", type=str, default="")
     parser.add_argument("--system_prompt_file", type=str, default="")
-    parser.add_argument("--user_template_file", type=str, default="prompts/financial_distill_teacher_user.txt")
+    parser.add_argument("--user_template_file", type=str, default="distill/prompts/financial_distill_teacher_user.txt")
     parser.add_argument("--num_candidates", type=int, default=4)
     parser.add_argument("--temperature_schedule", type=str, default="0.6")
     parser.add_argument("--top_p", type=float, default=1.0)

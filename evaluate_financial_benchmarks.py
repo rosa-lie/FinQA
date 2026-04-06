@@ -29,8 +29,10 @@ STRICT_OPTION_PATTERNS = [
     re.compile(r"^[\s\(\[（【]*([A-F])[\s\)\]）】\.。,，:：-]*$", re.IGNORECASE),
     re.compile(r"(?:最终答案|答案|正确答案|选项|answer|option)\s*(?:是|为|[:：])\s*([A-F])\b", re.IGNORECASE),
 ]
+ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
 NUMERIC_STRUCTURED_ANCHORS = ["问题分析：", "关键证据：", "推理程序：", "最终答案："]
 MCQ_STRUCTURED_ANCHORS = ["题目理解：", "推理：", "最终答案："]
@@ -208,7 +210,17 @@ def limit_records(records: List[Any], max_samples: int) -> List[Any]:
     return records
 
 
+
+
+def extract_answer_body(text: str) -> str:
+    tag_match = ANSWER_TAG_RE.search(text or "")
+    if tag_match:
+        return tag_match.group(1).strip()
+    return text or ""
+
+
 def extract_final_answer(text: str) -> str:
+    text = extract_answer_body(text or "")
     match = FINAL_ANSWER_RE.search(text or "")
     if match:
         return match.group(1).strip().split("\n")[0].strip()
@@ -459,7 +471,7 @@ def normalize_program(text: str) -> str:
 def parse_number(text: str) -> Optional[float]:
     if not text:
         return None
-    final_section = extract_section(text, FINAL_ANSWER_RE) or text
+    final_section = extract_section(extract_answer_body(text), FINAL_ANSWER_RE) or extract_answer_body(text) or text
     matches = NUMBER_RE.findall(final_section.replace("，", ","))
     if not matches:
         return None
@@ -477,12 +489,12 @@ def parse_number(text: str) -> Optional[float]:
 
 
 def normalize_answer_text(text: str) -> str:
-    text = extract_section(text, FINAL_ANSWER_RE) or text
+    text = extract_section(extract_answer_body(text), FINAL_ANSWER_RE) or extract_answer_body(text) or text
     return re.sub(r"\s+", "", text).strip().lower()
 
 
 def score_example(example: BenchmarkExample, prediction: str, args: argparse.Namespace) -> Dict[str, Any]:
-    final_answer = extract_section(prediction, FINAL_ANSWER_RE)
+    final_answer = extract_section(extract_answer_body(prediction), FINAL_ANSWER_RE) or extract_answer_body(prediction).strip().split("\n")[0].strip()
     program_section = extract_section(prediction, PROGRAM_RE)
     if example.answer_type == "numeric":
         structured_anchors = NUMERIC_STRUCTURED_ANCHORS

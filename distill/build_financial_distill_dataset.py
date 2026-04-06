@@ -2,6 +2,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import argparse
 import json
 import re
@@ -12,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from financial_data_processors.common import iter_records
 from financial_data_processors.families import FAMILY_MODULES
 
+ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"最终答案：\s*(.+)", re.DOTALL)
 
 
@@ -64,7 +72,17 @@ def parse_source_spec(spec: str) -> Tuple[str, Path]:
     return family, path
 
 
+
+
+def extract_answer_body(text: str) -> str:
+    tag_match = ANSWER_TAG_RE.search(text or "")
+    if tag_match:
+        return tag_match.group(1).strip()
+    return text or ""
+
+
 def extract_final_answer(text: str) -> str:
+    text = extract_answer_body(text or "")
     match = FINAL_ANSWER_RE.search(text or "")
     if match:
         return match.group(1).strip().split("\n")[0].strip()
