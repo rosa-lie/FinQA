@@ -700,3 +700,9 @@ Phase C：训练顺序
   - 全量汇总后输出 `work_dir/distill_failed.jsonl`
   - 失败记录保留 `record_id / generation_key / candidate_index / retry_attempts / error`
   - 当前策略是“记录失败并继续跑后续样本”，不再因为单个样本重试耗尽就直接打断整轮任务
+- 窗口化提交已实现：
+  - `distill/distill_with_teacher.py` 新增 `submit_window_size`
+  - 默认值为 `2 * max_concurrency`
+  - 不再一次性 submit 全部 future，而是始终只保留固定数量的 in-flight 请求
+  - 每完成一个 future，再补提一个新 job
+  - 好处：更省内存，请求提交更平滑，也更容易后续叠加全局限速控制

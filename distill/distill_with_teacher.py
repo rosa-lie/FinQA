@@ -272,6 +272,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--sleep_seconds", type=float, default=0.0)
     parser.add_argument("--max_concurrency", type=int, default=1)
+    parser.add_argument("--submit_window_size", type=int, default=0)
     parser.add_argument("--max_retries", type=int, default=3)
     parser.add_argument("--retry_sleep_seconds", type=float, default=2.0)
     parser.add_argument("--retry_backoff", type=float, default=2.0)
@@ -386,33 +387,59 @@ def main() -> None:
 
     generated = 0
     failed = 0
+    submit_window_size = args.submit_window_size if args.submit_window_size > 0 else max(args.max_concurrency * 2, 1)
+
+    def consume_result(result: Tuple[int, Optional[Dict[str, Any]], Optional[Dict[str, Any]]], success_file, failed_handle) -> Tuple[int, int]:
+        _, success, failure = result
+        generated_delta = 0
+        failed_delta = 0
+        if success is not None:
+            success_file.write(json.dumps(success, ensure_ascii=False) + "\n")
+            generated_delta = 1
+        if failure is not None and failed_handle is not None:
+            failed_handle.write(json.dumps(failure, ensure_ascii=False) + "\n")
+            failed_delta = 1
+        if args.sleep_seconds > 0:
+            time.sleep(args.sleep_seconds)
+        return generated_delta, failed_delta
+
     with output_path.open("a" if args.resume else "w", encoding="utf-8") as success_file:
         failed_handle = failed_output_path.open("a" if args.resume else "w", encoding="utf-8") if failed_output_path else None
         try:
             if args.max_concurrency <= 1 or len(jobs) <= 1:
                 for job in jobs:
-                    _, success, failure = process_job(job)
-                    if success is not None:
-                        success_file.write(json.dumps(success, ensure_ascii=False) + "\n")
-                        generated += 1
-                    if failure is not None and failed_handle is not None:
-                        failed_handle.write(json.dumps(failure, ensure_ascii=False) + "\n")
-                        failed += 1
-                    if args.sleep_seconds > 0:
-                        time.sleep(args.sleep_seconds)
+                    generated_delta, failed_delta = consume_result(process_job(job), success_file, failed_handle)
+                    generated += generated_delta
+                    failed += failed_delta
             else:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
-                    futures = [executor.submit(process_job, job) for job in jobs]
-                    for future in concurrent.futures.as_completed(futures):
-                        _, success, failure = future.result()
-                        if success is not None:
-                            success_file.write(json.dumps(success, ensure_ascii=False) + "\n")
-                            generated += 1
-                        if failure is not None and failed_handle is not None:
-                            failed_handle.write(json.dumps(failure, ensure_ascii=False) + "\n")
-                            failed += 1
-                        if args.sleep_seconds > 0:
-                            time.sleep(args.sleep_seconds)
+                    pending: Dict[concurrent.futures.Future, Tuple[int, Dict[str, Any], int, str, float]] = {}
+                    job_iter = iter(jobs)
+
+                    def submit_next() -> bool:
+                        try:
+                            next_job = next(job_iter)
+                        except StopIteration:
+                            return False
+                        future = executor.submit(process_job, next_job)
+                        pending[future] = next_job
+                        return True
+
+                    while len(pending) < submit_window_size and submit_next():
+                        pass
+
+                    while pending:
+                        done, _ = concurrent.futures.wait(
+                            pending.keys(),
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        for future in done:
+                            pending.pop(future, None)
+                            generated_delta, failed_delta = consume_result(future.result(), success_file, failed_handle)
+                            generated += generated_delta
+                            failed += failed_delta
+                        while len(pending) < submit_window_size and submit_next():
+                            pass
         finally:
             if failed_handle is not None:
                 failed_handle.close()
@@ -429,6 +456,7 @@ def main() -> None:
         "failed_rows": failed,
         "skipped_existing_rows": skipped,
         "max_concurrency": args.max_concurrency,
+        "submit_window_size": submit_window_size,
         "max_retries": args.max_retries,
         "retry_sleep_seconds": args.retry_sleep_seconds,
         "retry_backoff": args.retry_backoff,
