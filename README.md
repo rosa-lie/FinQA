@@ -1,4 +1,4 @@
-# 任务：金融对话数值推理模型（FinGPT-R1）：SFT → 轻量 DPO/GRPO → benchmark 评估
+# 任务：金融对话数值推理模型（FinGPT-R1）：Long CoT SFT → RL （轻量 DPO/GRPO） → benchmark 评估
 
 > 金融大模型真正难的，不是“知道一个金融术语”，而是“在金融场景里正确推理”。
 > **面向金融对话数值推理的 reasoning model：以 ConvFinQA 和 FinQA 为核心，辅以中文金融考试推理数据，训练一个能够进行多轮、数值、表文混合推理的金融小模型。**
@@ -15,6 +15,7 @@
 
  - 高质量的金融推理数据集：Fin-R1-Data，这是一个从多个权威金融数据集中提炼和过滤出的高质量COT数据集，专门设计用于专业金融推理场景。Fin-R1-Data涵盖了中英金融领域的多维专业知识，可以有效支持多个核心金融业务场景。型语言模型，精确满足金融行业对于决策过程、数字严谨性和强大商业泛化能力的核心需求。
  - 两阶段模型构建框架：我们提出了一个两阶段的工作流程框架，包括构建高质量的CoT 数据集并通过监督微调 （SFT） 和强化学习 （RL） 训练模型，可以有效提高模型的财务推理性能。
+
 
 ## 数据集
 
@@ -43,6 +44,39 @@
  - 评估结果：
 
 
+## 技术栈 / Tech Stack
+
+本项目的核心技术栈如下，均已在当前代码中实际使用：
+
+| 技术 / 框架 | 用途 |
+| --- | --- |
+| **Python** | 项目主语言；数据处理、训练、评估、推理与蒸馏脚本均基于 Python 实现 |
+| **PyTorch** | 底层深度学习训练与推理框架；SFT、DPO、GRPO、评测生成均运行在 PyTorch 生态上 |
+| **Hugging Face Transformers** | 模型加载、tokenizer、`generate` 推理、训练参数与模型配置管理 |
+| **Hugging Face Datasets** | 统一加载本地/HF 数据集，支撑训练集、评测集和多任务数据处理 |
+| **PEFT (LoRA / QLoRA)** | 参数高效微调；项目中的 LoRA adapter 训练、合并和推理都基于 PEFT |
+| **TRL** | 偏好优化与强化学习训练框架；用于 DPO、PPO、GRPO、ORPO 等对齐训练流程 |
+| **Accelerate** | 多卡/混合精度训练封装，支撑加速版训练流程与资源调度 |
+| **bitsandbytes** | 4-bit / 8-bit 量化加载，用于降低显存占用并支持 QLoRA 与低成本评估 |
+| **TensorBoard** | 训练过程中的 loss、eval 指标和实验日志可视化 |
+| **scikit-learn** | 部分数据处理与评测辅助组件依赖的通用机器学习工具库 |
+| **sentencepiece** | tokenizer 相关支持，适配部分基础模型和词表处理流程 |
+| **Gradio** | Web 交互式推理 demo，支持快速搭建本地问答页面 |
+| **FastAPI** | 提供推理服务接口，支持以 API 方式部署模型 |
+| **OpenAI-compatible API client** | 用于 teacher 蒸馏、judge 打分与角色数据生成；当前支持 OpenAI、DeepSeek、豆包、MiniMax |
+| **Jupyter Notebook** | 实验编排与复现实验流程；`run_fingpt_min.ipynb` 负责串联数据、训练、蒸馏和评测 |
+
+### 当前金融推理子项目实际使用到的模块
+
+- **数据处理**：`financial_data_processors/*`、`clean_sharegpt_dataset.py`、`audit_sharegpt_dirty_samples.py`、`filter_sharegpt_by_audit.py`
+- **SFT 训练**：`supervised_finetuning.py`、`supervised_finetuning_accelerate.py`
+- **偏好优化 / 强化学习**：`dpo_training.py`、`financial_grpo_training.py`、`ppo_training.py`、`orpo_training.py`
+- **蒸馏**：`distill/*`
+- **评测**：`evaluate_financial_benchmarks.py`
+- **推理与服务**：`inference.py`、`gradio_demo.py`、`fastapi_server_demo.py`
+
+这些框架共同组成了本项目的完整工作流：**数据构造 -> 蒸馏 -> SFT -> 偏好优化 / 强化学习 -> benchmark 评估 -> 部署推理**。
+
 # Done: 数据集
 
 > 我将训练数据划分为“金融语言理解”与“金融推理”两类，其中 FinQA 与 ConvFinQA 构成推理主干。
@@ -63,7 +97,8 @@
 
 ### sft 参考数据集
 
-https://huggingface.co/datasets/AdaptLLM/ConvFinQA/ “对话 + 数值推理”
+https://huggingface.co/datasets/AdaptLLM/ConvFinQA/  
+“对话 + 数值推理”
 
 https://finqasite.github.io/ https://github.com/czyssrs/FinQA
 - **核心特点**：
@@ -144,7 +179,7 @@ SFT2（ConvFinQA turn）：
 
 # Doing：distillation
 
-[distill文档](doc/fin_distill.md)
+[distill文档](docs/fin_distill.md)
 
 > **target：可验证的结构化 reasoning data distillation**
 

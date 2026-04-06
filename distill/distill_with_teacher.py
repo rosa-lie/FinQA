@@ -10,26 +10,34 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是一名金融数值推理教师模型。"
     "请严格使用 <think> 和 <answer> 标签输出，不要输出 JSON，不要添加额外说明。\n\n"
     "<think>\n"
-    "问题分析：...\n"
-    "关键证据：\n- ...\n"
-    "推理程序：...\n"
+    "在这里写逐步推理过程。\n"
     "</think>\n"
     "<answer>\n"
-    "最终答案：...\n"
+    "在这里仅输出最终答案本身。\n"
     "</answer>"
 )
 
+THREAD_LOCAL = threading.local()
 
+
+def strip_answer_prefix(text: str) -> str:
+    text = (text or "").strip()
+    for prefix in ("最终答案：", "最终答案:", "答案：", "答案:", "answer:", "Answer:"):
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
 
 
 def wrap_structured_response(response_text: str) -> str:
@@ -37,21 +45,23 @@ def wrap_structured_response(response_text: str) -> str:
     if not text:
         return text
     if "<think>" in text and "<answer>" in text:
+        if "</answer>" not in text:
+            return text + "\n</answer>"
         return text
     lines = text.splitlines()
     answer_start = None
     for i, line in enumerate(lines):
-        if line.startswith("最终答案："):
+        if line.startswith("最终答案：") or line.startswith("最终答案:") or line.startswith("答案：") or line.startswith("答案:"):
             answer_start = i
             break
     if answer_start is None:
         think_body = text
-        answer_body = "最终答案：信息不足，暂不作答。"
+        answer_body = "信息不足，暂不作答。"
     else:
         think_body = "\n".join(lines[:answer_start]).strip()
-        answer_body = "\n".join(lines[answer_start:]).strip()
-    think_body = think_body or "问题分析：请根据题意完成推理。\n关键证据：\n- 请结合材料提取关键证据。\n推理程序：请依据材料逐步完成数值计算。"
-    answer_body = answer_body or "最终答案：信息不足，暂不作答。"
+        answer_body = strip_answer_prefix("\n".join(lines[answer_start:]).strip())
+    think_body = think_body or "请根据题意完成逐步推理。"
+    answer_body = strip_answer_prefix(answer_body or "信息不足，暂不作答。")
     return f"<think>\n{think_body}\n</think>\n<answer>\n{answer_body}\n</answer>"
 
 
@@ -83,26 +93,40 @@ def read_system_prompt(args: argparse.Namespace) -> str:
 
 
 def make_generation_key(row: Dict[str, Any], candidate_index: int) -> str:
-    base = json.dumps({
-        "record_id": row.get("record_id", ""),
-        "prompt": row.get("prompt", ""),
-        "candidate_index": candidate_index,
-    }, ensure_ascii=False, sort_keys=True)
+    base = json.dumps(
+        {
+            "record_id": row.get("record_id", ""),
+            "prompt": row.get("prompt", ""),
+            "candidate_index": candidate_index,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
 
-def render_user_prompt(prompt: str, template_text: str) -> str:
+def render_user_prompt(row: Dict[str, Any], template_text: str) -> str:
     template = template_text or "{{ prompt }}"
-    if "{{ prompt }}" in template:
-        return template.replace("{{ prompt }}", prompt)
-    return prompt
+    values = {
+        "prompt": str(row.get("prompt") or ""),
+        "gold_answer": str(row.get("gold_answer") or ""),
+        "gold_program": str(row.get("gold_program") or ""),
+        "gold_response": str(row.get("gold_response") or ""),
+        "gold_supporting_facts": "\n".join(str(item) for item in (row.get("gold_supporting_facts") or []) if str(item).strip()),
+        "record_id": str(row.get("record_id") or ""),
+        "source_dataset": str(row.get("source_dataset") or ""),
+    }
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace(f"{{{{ {key} }}}}", value)
+    return rendered
 
 
-def build_messages(system_prompt: str, prompt: str, template_text: str) -> List[Dict[str, str]]:
+def build_messages(system_prompt: str, row: Dict[str, Any], template_text: str) -> List[Dict[str, str]]:
     messages: List[Dict[str, str]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": render_user_prompt(prompt, template_text)})
+    messages.append({"role": "user", "content": render_user_prompt(row, template_text)})
     return messages
 
 
@@ -118,6 +142,20 @@ def create_client(args: argparse.Namespace):
     return client, model_name
 
 
+def get_thread_client_bundle(args: argparse.Namespace, shared_client_bundle: Optional[Tuple[Any, str]]) -> Optional[Tuple[Any, str]]:
+    if args.backend != "openai":
+        return shared_client_bundle
+    if args.max_concurrency <= 1:
+        if shared_client_bundle is None:
+            raise ValueError("OpenAI-compatible backend requires a valid client.")
+        return shared_client_bundle
+    bundle = getattr(THREAD_LOCAL, "client_bundle", None)
+    if bundle is None:
+        bundle = create_client(args)
+        THREAD_LOCAL.client_bundle = bundle
+    return bundle
+
+
 def generate_with_openai(client: Any, model_name: str, messages: Sequence[Dict[str, str]], temperature: float, max_tokens: int, top_p: float) -> Tuple[str, Dict[str, Any]]:
     response = client.chat.completions.create(
         model=model_name,
@@ -126,36 +164,98 @@ def generate_with_openai(client: Any, model_name: str, messages: Sequence[Dict[s
         top_p=top_p,
         max_tokens=max_tokens,
     )
-    content = response.choices[0].message.content or ""
     raw = response.model_dump() if hasattr(response, "model_dump") else {}
-    return content.strip(), raw
+    content = response.choices[0].message.content or ""
+    message = {}
+    if raw.get("choices"):
+        message = raw["choices"][0].get("message") or {}
+    reasoning = str(message.get("reasoning_content") or "").strip()
+    content = str(content or "").strip()
+    if reasoning and content:
+        merged = "\n".join([reasoning, content])
+    else:
+        merged = reasoning or content
+    return merged.strip(), raw
 
 
 def generate_candidate(row: Dict[str, Any], args: argparse.Namespace, system_prompt: str, user_template_text: str, temperature: float, client_bundle: Optional[Tuple[Any, str]]) -> Tuple[str, Dict[str, Any]]:
     if args.backend == "gold":
-        return wrap_structured_response(str(row.get("gold_response") or "").strip()), {"backend": "gold"}
+        gold_think = str(row.get("gold_response") or "").strip()
+        gold_answer = strip_answer_prefix(str(row.get("gold_answer") or "").strip())
+        return f"<think>\n{gold_think}\n</think>\n<answer>\n{gold_answer}\n</answer>", {"backend": "gold"}
     if args.backend == "copy_gold_final":
-        gold_answer = str(row.get("gold_answer") or "").strip()
-        content = "\n".join([
-            "问题分析：根据题目和材料定位所需财务指标。",
-            "关键证据：",
-            "- 依据题目相关表格、文本和历史线索提取关键数值。",
-            f"推理程序：{str(row.get('gold_program') or '请依据材料逐步完成数值计算。').strip()}",
-            f"最终答案：{gold_answer}",
-        ])
-        return wrap_structured_response(content), {"backend": "copy_gold_final"}
+        gold_answer = strip_answer_prefix(str(row.get("gold_answer") or "").strip())
+        think_body = str(row.get("gold_program") or "请依据材料逐步完成数值计算。").strip()
+        content = f"<think>\n{think_body}\n</think>\n<answer>\n{gold_answer}\n</answer>"
+        return content, {"backend": "copy_gold_final"}
     if client_bundle is None:
         raise ValueError("OpenAI-compatible backend requires a valid client.")
     client, model_name = client_bundle
-    messages = build_messages(system_prompt, str(row.get("prompt") or ""), user_template_text)
+    messages = build_messages(system_prompt, row, user_template_text)
     response_text, raw = generate_with_openai(client, model_name, messages, temperature, args.max_tokens, args.top_p)
     return wrap_structured_response(response_text), raw
+
+
+def build_success_output(
+    row: Dict[str, Any],
+    args: argparse.Namespace,
+    candidate_index: int,
+    generation_key: str,
+    temperature: float,
+    response_text: str,
+    raw_response: Dict[str, Any],
+    model_name: str,
+    retry_attempts: int,
+) -> Dict[str, Any]:
+    return {
+        **row,
+        "candidate_index": candidate_index,
+        "generation_key": generation_key,
+        "teacher_backend": args.backend,
+        "teacher_provider": args.provider,
+        "teacher_model": model_name,
+        "teacher_temperature": temperature,
+        "teacher_top_p": args.top_p,
+        "teacher_max_tokens": args.max_tokens,
+        "response": response_text,
+        "raw_response": raw_response,
+        "retry_attempts": retry_attempts,
+        "generated_at": int(time.time()),
+    }
+
+
+def build_failed_output(
+    row: Dict[str, Any],
+    args: argparse.Namespace,
+    candidate_index: int,
+    generation_key: str,
+    temperature: float,
+    model_name: str,
+    retry_attempts: int,
+    error: Dict[str, str],
+) -> Dict[str, Any]:
+    return {
+        **row,
+        "candidate_index": candidate_index,
+        "generation_key": generation_key,
+        "teacher_backend": args.backend,
+        "teacher_provider": args.provider,
+        "teacher_model": model_name,
+        "teacher_temperature": temperature,
+        "teacher_top_p": args.top_p,
+        "teacher_max_tokens": args.max_tokens,
+        "retry_attempts": retry_attempts,
+        "failed": True,
+        "error": error,
+        "failed_at": int(time.time()),
+    }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate teacher candidates for financial distillation.")
     parser.add_argument("--input_file", type=str, required=True)
     parser.add_argument("--output_file", type=str, required=True)
+    parser.add_argument("--failed_output_file", type=str, default="")
     parser.add_argument("--backend", choices=["openai", "gold", "copy_gold_final"], default="openai")
     parser.add_argument("--provider", type=str, default=None)
     parser.add_argument("--api_key", type=str, default=None)
@@ -171,6 +271,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_rows", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--sleep_seconds", type=float, default=0.0)
+    parser.add_argument("--max_concurrency", type=int, default=1)
+    parser.add_argument("--max_retries", type=int, default=3)
+    parser.add_argument("--retry_sleep_seconds", type=float, default=2.0)
+    parser.add_argument("--retry_backoff", type=float, default=2.0)
     return parser.parse_args()
 
 
@@ -178,7 +282,10 @@ def main() -> None:
     args = parse_args()
     input_path = Path(args.input_file)
     output_path = Path(args.output_file)
+    failed_output_path = Path(args.failed_output_file) if args.failed_output_file else None
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if failed_output_path is not None:
+        failed_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = load_jsonl(input_path)
     if args.max_rows and args.max_rows > 0:
@@ -200,45 +307,131 @@ def main() -> None:
         client_bundle = create_client(args)
         resolved_model = client_bundle[1]
 
-    generated = 0
+    jobs: List[Tuple[int, Dict[str, Any], int, str, float]] = []
     skipped = 0
-    with output_path.open("a" if args.resume else "w", encoding="utf-8") as f:
-        for row in rows:
-            for candidate_index in range(args.num_candidates):
-                generation_key = make_generation_key(row, candidate_index)
-                if generation_key in existing_keys:
-                    skipped += 1
-                    continue
-                temperature = temperatures[candidate_index % len(temperatures)]
-                response_text, raw_response = generate_candidate(row, args, system_prompt, user_template_text, temperature, client_bundle)
-                out = {
-                    **row,
-                    "candidate_index": candidate_index,
-                    "generation_key": generation_key,
-                    "teacher_backend": args.backend,
-                    "teacher_provider": args.provider,
-                    "teacher_model": resolved_model or args.model or args.backend,
-                    "teacher_temperature": temperature,
-                    "teacher_top_p": args.top_p,
-                    "teacher_max_tokens": args.max_tokens,
-                    "response": response_text,
-                    "raw_response": raw_response,
-                    "generated_at": int(time.time()),
-                }
-                f.write(json.dumps(out, ensure_ascii=False) + "\n")
-                generated += 1
-                if args.sleep_seconds > 0:
-                    time.sleep(args.sleep_seconds)
+    sequence_index = 0
+    for row in rows:
+        for candidate_index in range(args.num_candidates):
+            generation_key = make_generation_key(row, candidate_index)
+            if generation_key in existing_keys:
+                skipped += 1
+                continue
+            temperature = temperatures[candidate_index % len(temperatures)]
+            jobs.append((sequence_index, row, candidate_index, generation_key, temperature))
+            sequence_index += 1
+
+    def process_job(job: Tuple[int, Dict[str, Any], int, str, float]) -> Tuple[int, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        sequence_index, row, candidate_index, generation_key, temperature = job
+        model_name = resolved_model or args.model or args.backend
+        attempts = 0
+        last_error: Dict[str, str] = {"type": "UnknownError", "message": "unknown"}
+        while True:
+            try:
+                job_client_bundle = get_thread_client_bundle(args, client_bundle)
+                model_name = job_client_bundle[1] if (args.backend == "openai" and job_client_bundle is not None) else model_name
+                response_text, raw_response = generate_candidate(
+                    row=row,
+                    args=args,
+                    system_prompt=system_prompt,
+                    user_template_text=user_template_text,
+                    temperature=temperature,
+                    client_bundle=job_client_bundle,
+                )
+                success = build_success_output(
+                    row=row,
+                    args=args,
+                    candidate_index=candidate_index,
+                    generation_key=generation_key,
+                    temperature=temperature,
+                    response_text=response_text,
+                    raw_response=raw_response,
+                    model_name=model_name,
+                    retry_attempts=attempts,
+                )
+                return sequence_index, success, None
+            except Exception as exc:
+                last_error = {"type": exc.__class__.__name__, "message": str(exc)}
+                if attempts >= args.max_retries:
+                    failure = build_failed_output(
+                        row=row,
+                        args=args,
+                        candidate_index=candidate_index,
+                        generation_key=generation_key,
+                        temperature=temperature,
+                        model_name=model_name,
+                        retry_attempts=attempts,
+                        error=last_error,
+                    )
+                    print(json.dumps({"event": "failed", "generation_key": generation_key, "candidate_index": candidate_index, "error": last_error}, ensure_ascii=False), file=sys.stderr, flush=True)
+                    return sequence_index, None, failure
+                sleep_seconds = args.retry_sleep_seconds * (args.retry_backoff ** attempts)
+                print(
+                    json.dumps(
+                        {
+                            "event": "retry",
+                            "generation_key": generation_key,
+                            "candidate_index": candidate_index,
+                            "attempt": attempts + 1,
+                            "sleep_seconds": sleep_seconds,
+                            "error": last_error,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
+                attempts += 1
+
+    generated = 0
+    failed = 0
+    with output_path.open("a" if args.resume else "w", encoding="utf-8") as success_file:
+        failed_handle = failed_output_path.open("a" if args.resume else "w", encoding="utf-8") if failed_output_path else None
+        try:
+            if args.max_concurrency <= 1 or len(jobs) <= 1:
+                for job in jobs:
+                    _, success, failure = process_job(job)
+                    if success is not None:
+                        success_file.write(json.dumps(success, ensure_ascii=False) + "\n")
+                        generated += 1
+                    if failure is not None and failed_handle is not None:
+                        failed_handle.write(json.dumps(failure, ensure_ascii=False) + "\n")
+                        failed += 1
+                    if args.sleep_seconds > 0:
+                        time.sleep(args.sleep_seconds)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
+                    futures = [executor.submit(process_job, job) for job in jobs]
+                    for future in concurrent.futures.as_completed(futures):
+                        _, success, failure = future.result()
+                        if success is not None:
+                            success_file.write(json.dumps(success, ensure_ascii=False) + "\n")
+                            generated += 1
+                        if failure is not None and failed_handle is not None:
+                            failed_handle.write(json.dumps(failure, ensure_ascii=False) + "\n")
+                            failed += 1
+                        if args.sleep_seconds > 0:
+                            time.sleep(args.sleep_seconds)
+        finally:
+            if failed_handle is not None:
+                failed_handle.close()
 
     print(json.dumps({
         "input_file": str(input_path),
         "output_file": str(output_path),
+        "failed_output_file": str(failed_output_path) if failed_output_path else "",
         "backend": args.backend,
         "model": resolved_model or args.model or args.backend,
         "rows": len(rows),
         "num_candidates": args.num_candidates,
         "generated_rows": generated,
+        "failed_rows": failed,
         "skipped_existing_rows": skipped,
+        "max_concurrency": args.max_concurrency,
+        "max_retries": args.max_retries,
+        "retry_sleep_seconds": args.retry_sleep_seconds,
+        "retry_backoff": args.retry_backoff,
     }, ensure_ascii=False, indent=2))
 
 

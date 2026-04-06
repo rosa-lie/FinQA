@@ -1,6 +1,6 @@
 # 金融数值推理数据蒸馏计划
 
-## 0. 介绍
+## 蒸馏介绍以及必要性
 
 **💡 蒸馏（Distillation）本质上就是：让一个更强的 teacher 模型，去给一个较小的 student 模型“示范怎么做题”，然后 student 去学 teacher 的行为模式。**
 - 普通 SFT：直接拿人工标注答案训练模型；
@@ -40,9 +40,172 @@
 | 未来 GRPO 后再蒸                          | DeepSeek-R1 + RL-aware KD  | R1 的 distilled dense models 证明了“teacher 强了再蒸”是有效路线；RL-aware KD 说明这还是研究热点 | 先作为 roadmap，不要现在主攻                                                                              |
 
 
+## 进度：每次更新在这个版块。
+
+### DONE
+
+- 新增 `distill/build_financial_distill_dataset.py`
+  - 从 `FinQA / ConvFinQA` raw 数据复用现有 family processor 构造蒸馏输入
+  - 默认对 `ConvFinQA` 复用最终轮去重口径
+- 新增 `distill/distill_with_teacher.py`
+  - 支持 `openai`、`gold`、`copy_gold_final` 三种 backend
+  - 支持多候选采样、温度调度、断点续跑
+- 重构 `distill/score_distill_candidates.py`
+  - 按 Fin-R1 思路改成两阶段过滤：`answer_check -> reasoning_selection`
+  - 支持 7 维 reasoning rubric
+  - 支持规则版与可选 `LLM-as-a-Judge` 版 reasoning selection
+  - 已兼容 `<answer>` 标签抽取，优先从 `<answer>` 中解析最终答案
+  - 直接产出训练可用的 `SFT` 与 `DPO` 数据文件
+- 新增 `distill/prompts/financial_reasoning_judge.txt`
+  - 统一管理 reasoning judge rubric prompt
+- 新增 `distill/run_financial_distill_pipeline.py`
+  - 串联 `build -> teacher -> score` 三段流程
+  - 输出 manifest，便于 notebook 与批量运行复用
+- 新增 `distill/decontaminate_financial_distill.py`
+  - 参考 open-r1 README 中的 decontamination 思路
+  - 用 n-gram overlap 对蒸馏输入或蒸馏结果做轻量去污
+- 已完成 smoke test
+  - `build -> generate -> score` 三段链路已跑通
+  - 新的 pipeline runner 已在 `gold` backend 下跑通
+  - `gold` backend 可稳定产出 `distill_sft.jsonl`
+  - 注入坏候选后，`distill_dpo.jsonl` 选择逻辑验证通过
+
+### TODO
+
+- 还没有把蒸馏 section 接入 `run_fingpt_min.ipynb`
+- `distill/score_distill_candidates.py` 的 program 一致性目前仍以字符串/算子序列为主，后续可继续加强为 AST 级比较
+- `LLM-as-a-Judge` 路径已预留接口，但还没有在真实 `DeepSeek-R1 -> judge` 流程上跑完整小样本实验
+- `distill/decontaminate_financial_distill.py` 目前还是轻量 n-gram overlap 版本，还不是 open-r1 那种更完整的分布式去污流程
+
+0. 配置`.env`
+1. deepseek-r1蒸馏链路
+2. llm-as-judge: qwen api
+
+### UPDATE
+
+#### DeepSeek-R1 teacher
+
+- 已把 `deepseek` provider 接入 `role_play_data/llm_client.py`
+- 默认模型设为 `deepseek-reasoner`，可作为 `DeepSeek-R1` teacher 使用
+- `distill/distill_with_teacher.py` 可直接通过以下参数调用：
+  - `--backend openai --provider deepseek`
+  - 或设置 `DEEPSEEK_API_KEY` 后省略 `--provider`，由 client 自动检测
+- 当前建议先用 `FinQA` 小样本验证 `DeepSeek-R1` 的结构稳定性和数值正确率，再扩展到 `ConvFinQA`
+
+#### Open-R1 distillation 迁移
+
+参考 `open-r1` 项目的 README distillation 部分，当前蒸馏链路已补入三项直接迁移：
+
+- 默认 `num_candidates=4`
+  - 对齐 open-r1 里单题多候选生成的思路，便于后续做 chosen/rejected 选择
+- 默认 `temperature=0.6`
+  - 对齐 open-r1 的 teacher 生成温度设定，优先获得较丰富的 reasoning 候选
+- 新增 `distill/prompts/financial_distill_teacher_user.txt`
+  - 对齐 open-r1 的模板化 user prompt 思路，把 teacher 输入包装成统一的 distillation prompt
+  - teacher 输出现在要求使用 `<think>` / `<answer>` 标签
+
+当前与 open-r1 的主要差异是：
+
+- open-r1 使用面向通用推理的 distillation 方案，本项目改成金融结构化格式输出
+- open-r1 更强调大规模分布式生成，本项目当前先优先保证金融数据处理、过滤和训练口径一致
+- open-r1 的蒸馏输出偏 `<think>/<answer>`，本项目保留 `问题分析 / 关键证据 / 推理程序 / 最终答案`
+
+#### DeepSeek-R1 smoke + notebook 接入
+
+- `role_play_data/llm_client.py` 已补标准库 `.env` 加载与 `OpenAI-compatible HTTP fallback`，即使环境里没有 `openai` Python 包，也可以直接使用 `.env` 中的 `DEEPSEEK_API_KEY` 调用 `deepseek-reasoner`。
+- `distill/distill_with_teacher.py` 已兼容 `deepseek-reasoner` 的返回形态：优先合并 `reasoning_content + content`，避免只拿到空 `content`。
+- 实际 smoke test 已跑通：
+  - 命令：`python distill/run_financial_distill_pipeline.py --source_spec finqa=/root/autodl-tmp/data/financial_reasoning/raw/finqa/dev.json --work_dir /root/autodl-tmp/outputs/financial_reasoning/distill_smoke_r1_v2 --teacher_backend openai --teacher_provider deepseek --teacher_model deepseek-reasoner --teacher_num_candidates 1 --teacher_temperature_schedule 0.6 --teacher_max_tokens 1024 --max_samples_per_family 2 --summary_csv`
+  - 结果：`input_rows=2`、`answer_check_pass_rows=2`、`reasoning_selection_pass_rows=2`、`sft_rows=2`、`dpo_rows=0`
+  - 说明：`DeepSeek-R1` 在 `max_tokens=1024` 下可稳定产出可通过两阶段过滤的 `FinQA` 小样本蒸馏结果。
+- `run_fingpt_min.ipynb` 已新增 `Distill` section：
+  - `0. Smoke Test: DeepSeek-R1`：真实调用 API，展示 `distill_summary / candidate preview / audit preview`
+  - `1. FinQA Distill-R1`：生成正式 `finqa-distill-r1` 命令与输出路径，默认不自动执行全量 API 任务，避免误触发大规模 token 消耗。
+- 当前 notebook 中建议的 `DeepSeek-R1` 默认参数：
+  - `teacher_num_candidates=1` for smoke
+  - `teacher_num_candidates=4` for finqa-distill-r1
+  - `temperature=0.6`
+  - `teacher_max_tokens=1024`
 
 
-## 1. 目标
+#### 收缩到 `<think>/<answer>` 基线
+
+- 第一阶段目标已明确收缩为：
+  - `<think>` 承载推理过程
+  - `<answer>` 只承载最终答案本身，并直接对标 `gold_answer`
+- `问题分析 / 关键证据 / 推理程序 / 最终答案` 不再作为当前蒸馏阶段的硬模板；后续若要加入，只作为增强项。
+- 已修改：
+  - `distill/prompts/financial_distill_teacher_user.txt`：不再要求四段结构，明确 `<answer>` 只输出答案本身。
+  - `distill/build_financial_distill_dataset.py`：从 distill prompt 中移除了旧的“请按以下结构作答”尾部，避免复用旧 SFT 模板。
+  - `distill/distill_with_teacher.py`：`gold_response -> <think>`，`gold_answer -> <answer>`；同时兼容未闭合 `<answer>` 标签。
+  - `distill/score_distill_candidates.py`：`answer_check` 和 `reasoning_selection` 都已切换到轻量 `<think>/<answer>` 口径，不再依赖四段结构锚点。
+- 最新 smoke test：
+  - 命令：`python distill/run_financial_distill_pipeline.py --source_spec finqa=/root/autodl-tmp/data/financial_reasoning/raw/finqa/dev.json --work_dir /root/autodl-tmp/outputs/financial_reasoning/distill_smoke_r1_v6 --teacher_backend openai --teacher_provider deepseek --teacher_model deepseek-reasoner --teacher_num_candidates 1 --teacher_temperature_schedule 0.6 --teacher_max_tokens 1024 --max_samples_per_family 2 --summary_csv`
+  - 结果：`input_rows=2`、`answer_check_pass_rows=2`、`reasoning_selection_pass_rows=2`、`sft_rows=2`、`dpo_rows=0`
+  - 结论：当前基线已经实现“`<think>/<answer>` 范式 + `<answer>` accuracy”。
+
+
+#### answer-conditioned / program-conditioned 口径拆分
+
+**answer-conditioned rationale distillation**：“在正确答案约束下，如何组织更好的思维链”
+- 让它重点学习如何围绕正确答案组织思维链”。
+- 强标注监督：gold answer、program、supporting facts
+- teacher 的角色从“解题者”改成“解释器”。也就是先把正确答案、关键证据、甚至程序都给它，再让它生成一条自然、清晰、适合 student 学习的推理链。这样 teacher 不需要自己探索，就不会频繁输出“不会做”；它的任务变成 把已有正确解组织成高质量 reasoning text。
+
+**program-conditioned distillation**
+ - 让teacher基于核心推理骨架（golden_program）让它生成“人类可读的步骤解释”。这样生成出的 reasoning chain 会更稳定，也更贴近真正想让模型学到的“表格字段定位 → 单位换算 → 数值比较”能力。
+ - 缺点：如果把 gold_response 全量暴露给 teacher，蒸馏会更像“改写”而不是“推理增强”。这更适合蒸 SFT，不一定能直接蒸出高质量 DPO，因为候选之间可能差异不够大。
+
+  所以更实用的方案是两阶段：
+  1. gold-guided rewrite 先产出高质量 SFT distill
+  2. 再在这个基础上做少量扰动或多候选生成，构造 DPO
+
+
+- `answer-conditioned rationale distillation`
+  - 只围绕 `gold_answer` 组织 reasoning
+  - 不再向 teacher 暴露 `gold_supporting_facts`、`gold_response`、`gold_program`
+- `program-conditioned distillation` 保持更严格：
+  - 基于 `gold_response` 做 reasoning rewrite
+  - 目标是得到更清晰、更适合 student 学习的推理链
+
+
+> 小样本观察结果`finqa_distill_compare_8`：
+> 1. 小样本下，program-conditioned 明显比 answer-conditioned 更稳。原因也很直接：只给 gold_answer 时，teacher 仍然会自己脑补解题路径，容易跑偏；给 gold_response 后，它更像 rewrite 任务，稳定得多。
+> 2. 大部分样本没有回答完就强行截断并加上了`</answer>`，这是不合理的：应该放宽max_tokens，其次应该思考思维链是否过长，最后直接强行加上`</answer>`作为结束是否不合适。经过smoke测试4样本，发现1024长度下不够稳定，2048足够盈余，tradeoff：1536.
+
+
+program-conditioned prompt 收缩 + smoke 配置调整
+- `program-conditioned` 模板已收缩，重点去掉会被 teacher 直接复述的元说明：
+  - 不再强调“你是教师模型”“你的目标是……”
+  - 明确要求 `<think>` 只写推理本身
+- smoke 默认配置调整为：
+  - `max_samples=4`
+  - `teacher_max_tokens=2048`
+- 目的：先判断截断是否主要由 `prompt 过重 + max_tokens 偏紧` 共同导致。
+
+1024-token smoke 对照
+- 为了验证截断是否主要由 `max_tokens` 驱动，smoke 配置已回切到：
+  - `max_samples=4`
+  - `teacher_max_tokens=1024`
+- 这轮将与 `2048-token` 的 `program_conditioned_smoke_4_v2` 做直接对照。
+
+1024 vs 1536 vs 2048
+  - 1536 比 1024 明显更稳，截断从 2/4 降到 1/4
+  - 但 1536 还没达到 2048 的完整性
+  - 三组在这 4 条上的评分通过率都一样，差异主要体现在“是否自然完整结束”
+  
+**sum: 当前推荐蒸馏模式**
+- 当前默认推荐路线已收敛为：`program-conditioned + 2048`
+- 原因：
+  - `program-conditioned` 在小样本对比中明显优于 `answer-conditioned`
+  - `2048` 在 `4` 条 smoke 中实现了 `finish_reason={'stop': 4}`，完整性优于 `1024` 和 `1536`
+- notebook 已同步切换到这一路线：
+  - smoke 默认使用 `program_conditioned_distill_user.txt`
+  - `teacher_max_tokens=2048`
+  - 正式 `finqa-distill-r1` 默认也使用同一模板
+
+
+## 蒸馏的目标：可验证的结构化 reasoning data distillation
 
 
 > **target：可验证的结构化 reasoning data distillation**
@@ -102,7 +265,7 @@ Tiny-Zero/EasyR1：增强教师。
 
 第一阶段只做 `FinQA` 和 `ConvFinQA`，不把 `Fineval`、`FIQA_QA` 等开放类数据混入蒸馏主链路。
 
-## 2. 设计原则
+### 设计原则
 
 **与训练格式保持一致**：teacher 输出必须和当前训练格式一致，避免蒸馏数据与现有 SFT / DPO / benchmark 分布不一致。
 
@@ -123,7 +286,14 @@ Tiny-Zero/EasyR1：增强教师。
 **阶段化蒸馏**：如果蒸馏后的 SFT 数据都不能让模型至少不弱于 `base`，继续堆 DPO / GRPO 只会放大偏差。
 
 
-### 参考
+## 参考
+
+**TODO：参考 DeepSeek-R1以及其相关复现项目[open-r1](https://github.com/huggingface/open-r1)**
+
+**TODO：参考[distill finqa相关论文](fin_ref.md)**
+
+
+> 参考论文：Fin-R1: A Large Language Model for Financial Reasoning through Reinforcement Learning（arXiv:2503.16252）
 
 Fin-R1 论文（Liu et al., 2025/2026, arXiv:2503.16252）
 - 数据不是单一来源，而是先按业务能力分层，再统一蒸馏与过滤
@@ -137,7 +307,63 @@ plan：
 - `TFNS / FinCUGE / 其他金融知识数据` 可在后续扩展时补入，形成更接近 Fin-R1 的多类金融任务组合
 - 当前阶段先把数值推理主链路跑通，再扩展到情感、分类、专业知识与代码数据
 
-**TODO：参考 DeepSeek-R1以及其相关复现项目[open-r1](https://github.com/huggingface/open-r1)**
+**数据集：**  
+Fin-R1-Data 共 60,091 条，中英双语，分为四类： financial advanced business knowledge，financial basic business knowledge，financial professional knowledge，financial code。
+ - reasoning 相关子集：`FinQA` `ConvFinQA` `TFNS` `FinCUGE`
+ - 基础知识与专业知识子集：`FinCorpus` `Ant-Finance` `Finance-500K` `FinanceIQ` `FinPEE` `FinanceQT`
+
+> 启发：构建多源数据源，譬如：按照 reasoning、knowledge、business、code 四类来组织。为了简化模型，第一阶段仍只做 `FinQA + ConvFinQA`。
+
+**数据构造：**
+1. `data distillation`
+   - 从 raw dataset 抽取问题
+   - 用 `DeepSeek-R1-671B` 生成 reasoning path 和 answer
+   - 温度设为 `0.6`
+   - 数学/计算类题要求用 `\boxed{}` 包最终答案
+2. `data filtering`
+   - 先做 `answer check`
+   - 再做 `reasoning selection`
+
+**answer check：**
+- 客观题：直接和参考答案对比
+- 主观题：用 `LLM-as-a-Judge`
+- judge 模型最终选 `Qwen2.5-72B-Instruct`
+
+**reasoning selection：**
+- 用 `Qwen2.5-72B-Instruct` 按七个维度评估 reasoning 质量
+- 七个维度包括：
+  - internal consistency
+  - term overlap rate
+  - number of reasoning steps
+  - logical coherence
+  - content diversity
+  - task-domain relevance
+  - alignment with task instructions
+- 只保留高质量 reasoning 进入 SFT
+
+> 启发：两段式filtering校验（答案校验；reasoning 质量校验）；`distill/score_distill_candidates.py` 下一版应从“单一 quality score”升级为“多维 rubric 打分”
+
+**训练流程：**
+1. `SFT`：用高质量 CoT 样本训练模型学会先思考再回答
+2. `GRPO`：在 SFT 基础上继续强化，reward = `format reward + accuracy reward`
+  - `format reward`
+    - 检查输出是否满足 `<think>...</think><answer>...</answer>`
+  - `accuracy reward`
+    - 用 `Qwen2.5-Max` 判断 `<answer>` 与 ground truth 是否语义一致
+- 只做 GRPO 的 `Fin-R1-Zero` 比 base 有提升，但增益有限，且输出容易 incoherent
+- 只做 SFT 的 `Fin-R1-SFT` 明显优于 base
+- `SFT + GRPO` 的完整两步式最好
+
+**评估流程**
+
+Fin-R1 评估用了五个代表性金融数据集： `FinQA` `ConvFinQA` `Ant-Finance` `TFNS` `Finance-Instruct-500K`
+- `Finance-Instruct-500K` 用分层采样得到 10% test subset
+- 其他数据集随机采样 1000 条；不足 1000 则全用
+- 对数值题不做僵硬 exact match，而是引入 LLM judge 处理数值格式差异、表达差异、有效等价表达
+
+> 启发：后续应补入至少一个非数值金融任务集，避免模型只在表文数值题上过拟合；数值题评估仍应保留“数值归一化 + 必要时 judge 判定”的双层机制。
+
+# 代码
 
 ## 3. 蒸馏对象
 
@@ -390,130 +616,6 @@ teacher 输入不包含：
 2. 再在完整 dev benchmark 上复核
 3. 如果 `sft_distill` 仍弱于 `base`，优先回查 teacher 输出和过滤规则
 
-## 进度
-
-### DONE
-
-- 新增 `distill/build_financial_distill_dataset.py`
-  - 从 `FinQA / ConvFinQA` raw 数据复用现有 family processor 构造蒸馏输入
-  - 默认对 `ConvFinQA` 复用最终轮去重口径
-- 新增 `distill/distill_with_teacher.py`
-  - 支持 `openai`、`gold`、`copy_gold_final` 三种 backend
-  - 支持多候选采样、温度调度、断点续跑
-- 重构 `distill/score_distill_candidates.py`
-  - 按 Fin-R1 思路改成两阶段过滤：`answer_check -> reasoning_selection`
-  - 支持 7 维 reasoning rubric
-  - 支持规则版与可选 `LLM-as-a-Judge` 版 reasoning selection
-  - 已兼容 `<answer>` 标签抽取，优先从 `<answer>` 中解析最终答案
-  - 直接产出训练可用的 `SFT` 与 `DPO` 数据文件
-- 新增 `distill/prompts/financial_reasoning_judge.txt`
-  - 统一管理 reasoning judge rubric prompt
-- 新增 `distill/run_financial_distill_pipeline.py`
-  - 串联 `build -> teacher -> score` 三段流程
-  - 输出 manifest，便于 notebook 与批量运行复用
-- 新增 `distill/decontaminate_financial_distill.py`
-  - 参考 open-r1 README 中的 decontamination 思路
-  - 用 n-gram overlap 对蒸馏输入或蒸馏结果做轻量去污
-- 已完成 smoke test
-  - `build -> generate -> score` 三段链路已跑通
-  - 新的 pipeline runner 已在 `gold` backend 下跑通
-  - `gold` backend 可稳定产出 `distill_sft.jsonl`
-  - 注入坏候选后，`distill_dpo.jsonl` 选择逻辑验证通过
-
-### TODO
-
-- 还没有把蒸馏 section 接入 `run_fingpt_min.ipynb`
-- `distill/score_distill_candidates.py` 的 program 一致性目前仍以字符串/算子序列为主，后续可继续加强为 AST 级比较
-- `LLM-as-a-Judge` 路径已预留接口，但还没有在真实 `DeepSeek-R1 -> judge` 流程上跑完整小样本实验
-- `distill/decontaminate_financial_distill.py` 目前还是轻量 n-gram overlap 版本，还不是 open-r1 那种更完整的分布式去污流程
-
-### 最新进展：DeepSeek-R1 teacher
-
-- 已把 `deepseek` provider 接入 `role_play_data/llm_client.py`
-- 默认模型设为 `deepseek-reasoner`，可作为 `DeepSeek-R1` teacher 使用
-- `distill/distill_with_teacher.py` 可直接通过以下参数调用：
-  - `--backend openai --provider deepseek`
-  - 或设置 `DEEPSEEK_API_KEY` 后省略 `--provider`，由 client 自动检测
-- 当前建议先用 `FinQA` 小样本验证 `DeepSeek-R1` 的结构稳定性和数值正确率，再扩展到 `ConvFinQA`
-
-### 最新进展：Open-R1 distillation 迁移
-
-参考 `open-r1` 项目的 README distillation 部分，当前蒸馏链路已补入三项直接迁移：
-
-- 默认 `num_candidates=4`
-  - 对齐 open-r1 里单题多候选生成的思路，便于后续做 chosen/rejected 选择
-- 默认 `temperature=0.6`
-  - 对齐 open-r1 的 teacher 生成温度设定，优先获得较丰富的 reasoning 候选
-- 新增 `distill/prompts/financial_distill_teacher_user.txt`
-  - 对齐 open-r1 的模板化 user prompt 思路，把 teacher 输入包装成统一的 distillation prompt
-  - teacher 输出现在要求使用 `<think>` / `<answer>` 标签
-
-当前与 open-r1 的主要差异是：
-
-- open-r1 使用面向通用推理的 distillation 方案，本项目改成金融结构化格式输出
-- open-r1 更强调大规模分布式生成，本项目当前先优先保证金融数据处理、过滤和训练口径一致
-- open-r1 的蒸馏输出偏 `<think>/<answer>`，本项目保留 `问题分析 / 关键证据 / 推理程序 / 最终答案`
-
-## 参考
-
-> 参考论文：Fin-R1: A Large Language Model for Financial Reasoning through Reinforcement Learning（arXiv:2503.16252）
-
-**数据集：**  
-Fin-R1-Data 共 60,091 条，中英双语，分为四类： financial advanced business knowledge，financial basic business knowledge，financial professional knowledge，financial code。
- - reasoning 相关子集：`FinQA` `ConvFinQA` `TFNS` `FinCUGE`
- - 基础知识与专业知识子集：`FinCorpus` `Ant-Finance` `Finance-500K` `FinanceIQ` `FinPEE` `FinanceQT`
-
-> 启发：构建多源数据源，譬如：按照 reasoning、knowledge、business、code 四类来组织。为了简化模型，第一阶段仍只做 `FinQA + ConvFinQA`。
-
-**数据构造：**
-1. `data distillation`
-   - 从 raw dataset 抽取问题
-   - 用 `DeepSeek-R1-671B` 生成 reasoning path 和 answer
-   - 温度设为 `0.6`
-   - 数学/计算类题要求用 `\boxed{}` 包最终答案
-2. `data filtering`
-   - 先做 `answer check`
-   - 再做 `reasoning selection`
-
-**answer check：**
-- 客观题：直接和参考答案对比
-- 主观题：用 `LLM-as-a-Judge`
-- judge 模型最终选 `Qwen2.5-72B-Instruct`
-
-**reasoning selection：**
-- 用 `Qwen2.5-72B-Instruct` 按七个维度评估 reasoning 质量
-- 七个维度包括：
-  - internal consistency
-  - term overlap rate
-  - number of reasoning steps
-  - logical coherence
-  - content diversity
-  - task-domain relevance
-  - alignment with task instructions
-- 只保留高质量 reasoning 进入 SFT
-
-> 启发：两段式filtering校验（答案校验；reasoning 质量校验）；`distill/score_distill_candidates.py` 下一版应从“单一 quality score”升级为“多维 rubric 打分”
-
-**训练流程：**
-1. `SFT`：用高质量 CoT 样本训练模型学会先思考再回答
-2. `GRPO`：在 SFT 基础上继续强化，reward = `format reward + accuracy reward`
-  - `format reward`
-    - 检查输出是否满足 `<think>...</think><answer>...</answer>`
-  - `accuracy reward`
-    - 用 `Qwen2.5-Max` 判断 `<answer>` 与 ground truth 是否语义一致
-- 只做 GRPO 的 `Fin-R1-Zero` 比 base 有提升，但增益有限，且输出容易 incoherent
-- 只做 SFT 的 `Fin-R1-SFT` 明显优于 base
-- `SFT + GRPO` 的完整两步式最好
-
-### 12.4 论文中的评估流程
-
-Fin-R1 评估用了五个代表性金融数据集： `FinQA` `ConvFinQA` `Ant-Finance` `TFNS` `Finance-Instruct-500K`
-- `Finance-Instruct-500K` 用分层采样得到 10% test subset
-- 其他数据集随机采样 1000 条；不足 1000 则全用
-- 对数值题不做僵硬 exact match，而是引入 LLM judge 处理数值格式差异、表达差异、有效等价表达
-
-> 启发：后续应补入至少一个非数值金融任务集，避免模型只在表文数值题上过拟合；数值题评估仍应保留“数值归一化 + 必要时 judge 判定”的双层机制。
-
 ## 展望
 
 #### Phase A：蒸馏数据升级
@@ -556,3 +658,45 @@ Phase C：训练顺序
 - `sft_distill` 不能弱于 `base`
 - `sft_distill + dpo_distill` 需要在 `FinQA/ConvFinQA` 上有稳定增益
 - 若达不到，再回查蒸馏过滤与 teacher 输出，而不是直接堆更多 RL
+
+并发 pipeline 更新（2026-04-06）
+- `distill/distill_with_teacher.py` 已支持 `--max_concurrency`，对 teacher 候选生成使用 `ThreadPoolExecutor` 并发调用；串行仍可通过 `--max_concurrency 1` 保留。
+- `distill/run_financial_distill_pipeline.py` 已新增 `--teacher_max_concurrency`，并会透传到 teacher 生成阶段，同时写入 `distill_manifest.json`。
+- `run_fingpt_min.ipynb` 的 Distill section 已同步：
+  - 新增 `DISTILL_TEACHER_MAX_CONCURRENCY = 4`
+  - smoke 与正式 `finqa-distill-r1` 命令都会显式传 `--teacher_max_concurrency`
+  - 当前 notebook 默认对齐 `program_conditioned_smoke_4_v4`：`program-conditioned + 1536`，并发默认 `4`
+- 已用 `gold` backend 跑通并发 smoke：
+  - 命令包含 `--teacher_num_candidates 2 --teacher_max_concurrency 4`
+  - 结果：`generated_rows=8`，manifest 记录 `teacher_max_concurrency=4`
+- 当前建议：真实 `DeepSeek-R1` 全量蒸馏先从 `teacher_max_concurrency=4` 起步，观察 API 限速与错误率，再决定是否升到 `6` 或 `8`。
+
+并发重试与 checkpoint 更新（2026-04-06）
+- `distill/distill_with_teacher.py` 现已加入默认重试策略：
+  - `max_retries=3`
+  - `retry_sleep_seconds=2.0`
+  - `retry_backoff=2.0`
+- retry 行为改为“失败后先 sleep/backoff，再重试”，并将 retry 事件打印到 stderr，方便排查 429 / 超时 / 网络抖动。
+- 并发实现补充了 thread-local client 复用：并发 worker 不再为每条样本重复重建 OpenAI-compatible client，降低连接初始化开销。
+- `distill/run_financial_distill_pipeline.py` 已新增 checkpoint 分片机制：
+  - `checkpoint_rows=512`（默认）
+  - 数据会切到 `work_dir/checkpoints/inputs/part_XXXXX.jsonl`
+  - 候选输出写到 `work_dir/checkpoints/candidates/part_XXXXX.jsonl`
+  - 若某个分片已达到 `input_rows * num_candidates`，下次重启会自动 skip
+  - 全部分片完成后再 merge 成总的 `distill_candidates.jsonl`
+- `run_fingpt_min.ipynb` 已同步暴露这些参数：
+  - `DISTILL_TEACHER_MAX_RETRIES = 3`
+  - `DISTILL_TEACHER_RETRY_SLEEP_SECONDS = 2.0`
+  - `DISTILL_TEACHER_RETRY_BACKOFF = 2.0`
+  - `DISTILL_CHECKPOINT_ROWS = 512`
+- 已用 `gold` backend 跑通 checkpoint smoke：
+  - `teacher_num_candidates=2`
+  - `teacher_max_concurrency=4`
+  - `checkpoint_rows=2`
+  - manifest 已正确记录 `checkpoint_dir / checkpoint_count / teacher_max_retries / retry_backoff`
+- 失败样本日志已补齐：
+  - `distill/distill_with_teacher.py` 支持 `--failed_output_file`
+  - 每个分片的失败样本会写入 `checkpoints/failed/part_XXXXX.jsonl`
+  - 全量汇总后输出 `work_dir/distill_failed.jsonl`
+  - 失败记录保留 `record_id / generation_key / candidate_index / retry_attempts / error`
+  - 当前策略是“记录失败并继续跑后续样本”，不再因为单个样本重试耗尽就直接打断整轮任务

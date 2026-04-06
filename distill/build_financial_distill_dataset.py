@@ -17,10 +17,12 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Tuple
 
 from financial_data_processors.common import iter_records
+from financial_data_processors.common import summarize_evidence_blocks
 from financial_data_processors.families import FAMILY_MODULES
 
 ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"最终答案：\s*(.+)", re.DOTALL)
+DISTILL_PROMPT_CUTOFF_RE = re.compile(r"\n\s*请按以下结构作答[\s\S]*$")
 
 
 DEFAULT_ARGS = SimpleNamespace(
@@ -89,6 +91,14 @@ def extract_final_answer(text: str) -> str:
     return (text or "").strip()
 
 
+
+
+def normalize_distill_prompt(prompt: str) -> str:
+    prompt = (prompt or "").strip()
+    prompt = DISTILL_PROMPT_CUTOFF_RE.sub("", prompt).strip()
+    prompt = prompt.replace("你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。", "你是一道金融推理题。请阅读材料并回答问题。")
+    return prompt
+
 def build_processor_args(args: argparse.Namespace) -> SimpleNamespace:
     return SimpleNamespace(
         max_history_turns=args.max_history_turns,
@@ -109,11 +119,16 @@ def build_distill_row(rec: Dict[str, Any], family: str, processor_args: SimpleNa
     conversations = item.get("conversations") or []
     if len(conversations) < 2:
         return None
-    prompt = (conversations[0].get("value") or "").strip()
+    prompt = normalize_distill_prompt((conversations[0].get("value") or "").strip())
     gold_response = (conversations[1].get("value") or "").strip()
     gold_answer = extract_final_answer(gold_response)
     metadata = dict(item.get("metadata") or {})
     gold_program = str(metadata.get("program") or "").strip()
+    gold_supporting_facts = summarize_evidence_blocks(
+        metadata.get("gold_inds") or metadata.get("gold_ind"),
+        max_items=processor_args.max_supporting_facts,
+        max_chars=processor_args.max_context_chars,
+    )
     if not prompt or not gold_answer:
         return None
     return {
@@ -121,6 +136,7 @@ def build_distill_row(rec: Dict[str, Any], family: str, processor_args: SimpleNa
         "gold_response": gold_response,
         "gold_answer": gold_answer,
         "gold_program": gold_program,
+        "gold_supporting_facts": gold_supporting_facts,
         "task_name": family,
         "source_dataset": item.get("source_dataset", family),
         "record_id": item.get("record_id") or rec.get("id") or rec.get("filename") or "",

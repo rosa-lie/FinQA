@@ -16,7 +16,8 @@
 
 ## SFT 参考数据集
 
-https://finqasite.github.io/ https://github.com/czyssrs/FinQA
+https://finqasite.github.io/ https://github.com/czyssrs/FinQA:  
+FinQA 是一个针对金融报告进行 复杂数值推理 的大规模数据集。它由金融专家基于 S&P 500 公司的收益报告编写，包含 8,281 个问答对，旨在测试模型在处理结构化表格和非结构化文本时的计算能力。
 - **核心特点**：
   - **专家标注**：11名美国金融专家标注，时薪$20-50
   - **结构化推理**：每个问题附带推理程序（operation步骤）
@@ -25,7 +26,7 @@ https://finqasite.github.io/ https://github.com/czyssrs/FinQA
 - **推理复杂度**：59.1%单步推理，32.71%两步，8.19%三步+
 - **最佳用途**：评估模型**数值推理能力**、**表格理解能力**
 
-https://huggingface.co/datasets/AdaptLLM/ConvFinQA/
+https://huggingface.co/datasets/AdaptLLM/ConvFinQA/:  
 - **核心特点**：多轮对话 + 金融数值推理
 - **最佳用途**：评估/训练模型在连续追问中的推理一致性与上下文保持
 

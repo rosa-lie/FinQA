@@ -17,13 +17,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
+ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)(?:\s*</answer>|$)", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
-THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.IGNORECASE | re.DOTALL)
+THINK_TAG_RE = re.compile(r"<think>\s*(.*?)(?:\s*</think>|$)", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?%?")
 JSON_LIKE_RE = re.compile(r'\{\s*"(?:text|table|value|content|sentence|evidence|gold_ind|gold_inds)')
-STRUCTURED_ANCHORS = ["问题分析：", "关键证据：", "推理程序：", "最终答案："]
 RUBRIC_FIELDS = [
     "internal_consistency",
     "instruction_alignment",
@@ -150,21 +149,25 @@ def operator_sequence(program_text: str) -> List[str]:
 def build_answer_check(row: Dict[str, Any], abs_tol: float, rel_tol: float) -> Dict[str, Any]:
     response = str(row.get("response") or "").strip()
     answer_text = extract_answer_body(response)
-    final_answer = extract_section(answer_text, FINAL_ANSWER_RE) or extract_answer_body(response).strip().split("\n")[0].strip()
+    final_answer = extract_section(answer_text, FINAL_ANSWER_RE) or answer_text.strip().split("\n")[0].strip()
     program_section = extract_section(response, PROGRAM_RE)
-    structured = all(anchor in response for anchor in STRUCTURED_ANCHORS)
+    has_think = bool(THINK_TAG_RE.search(response))
+    has_answer = bool(ANSWER_TAG_RE.search(response))
+    format_ok = bool(has_think and has_answer and final_answer)
     ans_ok = answer_correct(response, str(row.get("gold_answer") or ""), abs_tol, rel_tol)
     gold_program = str(row.get("gold_program") or "").strip()
     prog_ok = program_consistent(program_section, gold_program)
     evidence_hits = json_like_hits(response)
     operator_match = None
-    if gold_program:
+    if gold_program and program_section:
         operator_match = operator_sequence(program_section) == operator_sequence(gold_program)
-    answer_check_pass = bool(structured and final_answer and ans_ok and evidence_hits == 0)
+    answer_check_pass = bool(format_ok and ans_ok and evidence_hits == 0)
     return {
         "final_answer": final_answer,
         "program_section": program_section,
-        "structured": structured,
+        "has_think": has_think,
+        "has_answer": has_answer,
+        "format_ok": format_ok,
         "answer_correct": ans_ok,
         "program_consistent": prog_ok,
         "operator_sequence_match": operator_match,
@@ -176,28 +179,29 @@ def build_answer_check(row: Dict[str, Any], abs_tol: float, rel_tol: float) -> D
 
 def heuristic_reasoning_scores(row: Dict[str, Any], answer_info: Dict[str, Any]) -> Dict[str, Any]:
     response = str(row.get("response") or "")
-    evidence = get_evidence_section(response)
+    think_match = THINK_TAG_RE.search(response)
+    think_text = think_match.group(1).strip() if think_match else ""
     program_section = answer_info.get("program_section") or ""
     final_answer = answer_info.get("final_answer") or ""
-    bullets = len([line for line in evidence.splitlines() if line.strip().startswith("-")])
-    program_len = len(program_section)
     repeated_lines = len(set(response.splitlines())) < max(1, len(response.splitlines()) - 1)
+    think_len = len(think_text)
+    program_len = len(program_section)
 
     scores = {
-        "internal_consistency": 2 if answer_info.get("answer_correct") else 1 if answer_info.get("structured") else 0,
-        "instruction_alignment": 2 if answer_info.get("structured") and final_answer else 1 if answer_info.get("structured") else 0,
-        "task_relevance": 2 if bullets > 0 and program_len > 0 else 1 if program_len > 0 else 0,
-        "logical_coherence": 2 if answer_info.get("program_consistent") is True else 1 if program_len > 0 else 0,
-        "evidence_quality": 2 if answer_info.get("evidence_json_like_hits", 0) == 0 and bullets > 0 else 1 if bullets > 0 else 0,
-        "reasoning_completeness": 2 if bullets > 0 and program_len > 0 and final_answer else 1 if final_answer else 0,
-        "content_diversity": 2 if not repeated_lines and len(response) >= 120 else 1 if len(response) >= 60 else 0,
+        "internal_consistency": 2 if answer_info.get("answer_correct") else 1 if answer_info.get("format_ok") else 0,
+        "instruction_alignment": 2 if answer_info.get("format_ok") and final_answer else 1 if answer_info.get("format_ok") else 0,
+        "task_relevance": 2 if think_len >= 80 else 1 if think_len >= 20 else 0,
+        "logical_coherence": 2 if answer_info.get("program_consistent") is True else 1 if think_len >= 80 or program_len > 0 else 0,
+        "evidence_quality": 2 if answer_info.get("evidence_json_like_hits", 0) == 0 and think_len >= 20 else 1 if answer_info.get("evidence_json_like_hits", 0) == 0 else 0,
+        "reasoning_completeness": 2 if think_len >= 80 and final_answer else 1 if final_answer else 0,
+        "content_diversity": 2 if not repeated_lines and think_len >= 80 else 1 if think_len >= 20 else 0,
     }
-    summary = "规则评分"
+    summary = "规则评分（轻量 <think>/<answer> 口径）"
     return {
         **scores,
         "summary": summary,
         "rubric_total": sum(scores.values()),
-        "reasoning_selection_pass": bool(scores["instruction_alignment"] >= 1 and scores["task_relevance"] >= 1 and scores["logical_coherence"] >= 1 and scores["evidence_quality"] >= 1 and sum(scores.values()) >= 8),
+        "reasoning_selection_pass": bool(scores["instruction_alignment"] >= 1 and scores["task_relevance"] >= 1 and scores["evidence_quality"] >= 1 and sum(scores.values()) >= 8),
         "judge_backend": "heuristic",
     }
 
@@ -289,7 +293,7 @@ def reasoning_selection(row: Dict[str, Any], answer_info: Dict[str, Any], args: 
 def final_quality(answer_info: Dict[str, Any], reasoning_info: Dict[str, Any]) -> float:
     score = 0.0
     score += 4.0 if answer_info.get("answer_correct") else 0.0
-    score += 1.5 if answer_info.get("structured") else 0.0
+    score += 1.5 if answer_info.get("format_ok") else 0.0
     score += 0.5 if answer_info.get("final_answer") else 0.0
     score += 1.0 if answer_info.get("program_consistent") is True else 0.0
     score -= min(2.0, (answer_info.get("evidence_json_like_hits") or 0) * 0.5)
