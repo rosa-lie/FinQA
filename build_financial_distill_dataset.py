@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -99,9 +98,6 @@ def build_distill_row(rec: Dict[str, Any], family: str, processor_args: SimpleNa
     gold_program = str(metadata.get("program") or "").strip()
     if not prompt or not gold_answer:
         return None
-    record_id = str(item.get("record_id") or rec.get("id") or rec.get("filename") or "").strip()
-    if not record_id:
-        record_id = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:16]
     return {
         "prompt": prompt,
         "gold_response": gold_response,
@@ -109,7 +105,7 @@ def build_distill_row(rec: Dict[str, Any], family: str, processor_args: SimpleNa
         "gold_program": gold_program,
         "task_name": family,
         "source_dataset": item.get("source_dataset", family),
-        "record_id": record_id,
+        "record_id": item.get("record_id") or rec.get("id") or rec.get("filename") or "",
         "metadata": metadata,
     }
 

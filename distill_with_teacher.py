@@ -46,24 +46,11 @@ def read_system_prompt(args: argparse.Namespace) -> str:
     return DEFAULT_SYSTEM_PROMPT
 
 
-def make_generation_key(
-    row: Dict[str, Any],
-    candidate_index: int,
-    backend: str,
-    provider: Optional[str],
-    model: Optional[str],
-    temperature: float,
-) -> str:
+def make_generation_key(row: Dict[str, Any], candidate_index: int) -> str:
     base = json.dumps({
         "record_id": row.get("record_id", ""),
-        "source_dataset": row.get("source_dataset", ""),
-        "task_name": row.get("task_name", ""),
         "prompt": row.get("prompt", ""),
         "candidate_index": candidate_index,
-        "teacher_backend": backend,
-        "teacher_provider": provider or "",
-        "teacher_model": model or "",
-        "teacher_temperature": temperature,
     }, ensure_ascii=False, sort_keys=True)
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
@@ -181,18 +168,11 @@ def main() -> None:
     with output_path.open("a" if args.resume else "w", encoding="utf-8") as f:
         for row in rows:
             for candidate_index in range(args.num_candidates):
-                temperature = temperatures[candidate_index % len(temperatures)]
-                generation_key = make_generation_key(
-                    row=row,
-                    candidate_index=candidate_index,
-                    backend=args.backend,
-                    provider=args.provider,
-                    model=resolved_model or args.model or "",
-                    temperature=temperature,
-                )
+                generation_key = make_generation_key(row, candidate_index)
                 if generation_key in existing_keys:
                     skipped += 1
                     continue
+                temperature = temperatures[candidate_index % len(temperatures)]
                 response_text, raw_response = generate_candidate(row, args, system_prompt, user_template_text, temperature, client_bundle)
                 out = {
                     **row,
