@@ -96,7 +96,6 @@ def extract_final_answer(text: str) -> str:
 def normalize_distill_prompt(prompt: str) -> str:
     prompt = (prompt or "").strip()
     prompt = DISTILL_PROMPT_CUTOFF_RE.sub("", prompt).strip()
-    prompt = prompt.replace("你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。", "你是一道金融推理题。请阅读材料并回答问题。")
     return prompt
 
 def build_processor_args(args: argparse.Namespace) -> SimpleNamespace:

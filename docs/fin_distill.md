@@ -706,3 +706,8 @@ Phase C：训练顺序
   - 不再一次性 submit 全部 future，而是始终只保留固定数量的 in-flight 请求
   - 每完成一个 future，再补提一个新 job
   - 好处：更省内存，请求提交更平滑，也更容易后续叠加全局限速控制
+- 默认模板入口已切到 `distill/prompts/program_conditioned_distill_user.txt`：
+  - `distill/distill_with_teacher.py` 若未显式传 `--user_template_file`，默认即使用 `program_conditioned_distill_user.txt`
+- `distill/build_financial_distill_dataset.py` 已去掉对 prompt 头部的 `replace(...)`：
+  - 不再把旧 instruction 强行替换成“你是一道金融推理题。请阅读材料并回答问题。”
+  - distill input prompt 现在保留 processor 生成的原始题面文本，只继续做 cutoff 清理

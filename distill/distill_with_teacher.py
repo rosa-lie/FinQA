@@ -263,7 +263,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--system_prompt", type=str, default="")
     parser.add_argument("--system_prompt_file", type=str, default="")
-    parser.add_argument("--user_template_file", type=str, default="distill/prompts/financial_distill_teacher_user.txt")
+    parser.add_argument("--user_template_file", type=str, default="distill/prompts/program_conditioned_distill_user.txt")
     parser.add_argument("--num_candidates", type=int, default=4)
     parser.add_argument("--temperature_schedule", type=str, default="0.6")
     parser.add_argument("--top_p", type=float, default=1.0)
