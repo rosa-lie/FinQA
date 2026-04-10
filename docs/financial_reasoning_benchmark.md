@@ -84,7 +84,7 @@
 
 ## 4. 评测脚本
 
-新增脚本：`evaluate_financial_benchmarks.py`
+新增脚本：`evaluation/evaluate_financial_benchmarks.py`
 
 功能：
 - 一次性评估多个模型
@@ -103,7 +103,7 @@
 ## 5. 命令示例
 
 ```bash
-python evaluate_financial_benchmarks.py \
+python -m evaluation.evaluate_financial_benchmarks \
   --tokenizer_path /root/autodl-tmp/models/qwen/Qwen2___5-7B-Instruct \
   --model_entry base=/root/autodl-tmp/models/qwen/Qwen2___5-7B-Instruct \
   --model_entry sft1=/root/autodl-tmp/outputs/financial_reasoning/sft1_merged \

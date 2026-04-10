@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -131,7 +131,7 @@ def build_messages(system_prompt: str, row: Dict[str, Any], template_text: str) 
 
 
 def create_client(args: argparse.Namespace):
-    from role_play_data.llm_client import create_llm_client
+    from domain.roleplay.llm_client import create_llm_client
 
     client, model_name = create_llm_client(
         provider=args.provider,
@@ -263,8 +263,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--system_prompt", type=str, default="")
     parser.add_argument("--system_prompt_file", type=str, default="")
-    parser.add_argument("--user_template_file", type=str, default="distill/prompts/program_conditioned_distill_user.txt")
-    parser.add_argument("--num_candidates", type=int, default=4)
+    parser.add_argument("--user_template_file", type=str, default="domain/financial/distill/prompts/program_conditioned_distill_user.txt")
+    parser.add_argument("--num_candidates", type=int, default=3)
     parser.add_argument("--temperature_schedule", type=str, default="0.6")
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--max_tokens", type=int, default=512)

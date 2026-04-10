@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -46,6 +46,23 @@ def count_jsonl_rows(path: Path) -> int:
     with path.open('r', encoding='utf-8') as f:
         return sum(1 for line in f if line.strip())
 
+def append_file(src: Path, dst_handle) -> None:
+    if not src.exists():
+        return
+    with src.open('r', encoding='utf-8') as f:
+        for line in f:
+            dst_handle.write(line)
+
+
+
+
+
+def normalize_distill_output_path(path_str: str) -> Path:
+    path = Path(path_str)
+    normalized = str(path)
+    normalized = normalized.replace('/outputs/financial_reasoning/', '/data/financial_reasoning/')
+    normalized = normalized.replace('/outputs/financial_reasoning', '/data/financial_reasoning')
+    return Path(normalized)
 
 def iter_chunks(rows: List[Dict[str, object]], chunk_size: int) -> Iterable[List[Dict[str, object]]]:
     if chunk_size <= 0:
@@ -62,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--teacher_backend', choices=['openai', 'gold', 'copy_gold_final'], default='openai')
     parser.add_argument('--teacher_provider', type=str, default='deepseek')
     parser.add_argument('--teacher_model', type=str, default='deepseek-reasoner')
-    parser.add_argument('--teacher_num_candidates', type=int, default=4)
+    parser.add_argument('--teacher_num_candidates', type=int, default=3)
     parser.add_argument('--teacher_temperature_schedule', type=str, default='0.6')
     parser.add_argument('--teacher_max_tokens', type=int, default=512)
     parser.add_argument('--teacher_max_concurrency', type=int, default=4)
@@ -76,14 +93,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--enable_reasoning_judge', action='store_true')
     parser.add_argument('--judge_provider', type=str, default='deepseek')
     parser.add_argument('--judge_model', type=str, default='deepseek-chat')
-    parser.add_argument('--judge_prompt_file', type=str, default='distill/prompts/financial_reasoning_judge.txt')
+    parser.add_argument('--judge_prompt_file', type=str, default='domain/financial/distill/prompts/financial_reasoning_judge.txt')
     parser.add_argument('--summary_csv', action='store_true')
+    parser.add_argument('--generate_synthetic_rejected', action='store_true')
+    parser.add_argument('--synthetic_rejected_modes', type=str, default='answer_perturb,think_empty,think_program')
+    parser.add_argument('--synthetic_rejected_max_per_group', type=int, default=1)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    work_dir = Path(args.work_dir)
+    work_dir = normalize_distill_output_path(args.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     input_file = work_dir / 'distill_input.jsonl'
@@ -105,7 +125,7 @@ def main() -> None:
 
     build_cmd = [
         sys.executable,
-        'distill/build_financial_distill_dataset.py',
+        '-m', 'domain.financial.distill.build_financial_distill_dataset',
         '--output_file', str(input_file),
         '--max_samples_per_family', str(args.max_samples_per_family),
         '--convfinqa_keep_final_only', str(args.convfinqa_keep_final_only),
@@ -138,7 +158,7 @@ def main() -> None:
 
         teacher_cmd = [
             sys.executable,
-            'distill/distill_with_teacher.py',
+            '-m', 'domain.financial.distill.distill_with_teacher',
             '--input_file', str(chunk_input_file),
             '--output_file', str(chunk_candidate_file),
             '--failed_output_file', str(chunk_failed_file),
@@ -178,7 +198,7 @@ def main() -> None:
 
     score_cmd = [
         sys.executable,
-        'distill/score_distill_candidates.py',
+        '-m', 'domain.financial.distill.score_distill_candidates',
         '--input_file', str(candidates_file),
         '--audit_output_file', str(audit_file),
         '--sft_output_file', str(sft_file),
@@ -194,7 +214,50 @@ def main() -> None:
             '--judge_model', args.judge_model,
             '--judge_prompt_file', args.judge_prompt_file,
         ])
-    run_command(score_cmd)
+    if not args.generate_synthetic_rejected:
+        run_command(score_cmd)
+    else:
+        score_cmd.extend(['--skip_dpo'])
+        run_command(score_cmd)
+
+        rejected_file = work_dir / 'distill_rejected_candidates.jsonl'
+        rejected_cmd = [
+            sys.executable,
+            '-m', 'domain.financial.distill.build_rejected_candidates',
+            '--input_file', str(audit_file),
+            '--output_file', str(rejected_file),
+            '--modes', args.synthetic_rejected_modes,
+            '--max_per_group', str(args.synthetic_rejected_max_per_group),
+        ]
+        run_command(rejected_cmd)
+
+        merged_candidates = work_dir / 'distill_candidates_with_rejected.jsonl'
+        with merged_candidates.open('w', encoding='utf-8') as out:
+            append_file(candidates_file, out)
+            append_file(rejected_file, out)
+
+        dpo_cmd = [
+            sys.executable,
+            '-m', 'domain.financial.distill.score_distill_candidates',
+            '--input_file', str(merged_candidates),
+            '--audit_output_file', str(audit_file),
+            '--sft_output_file', str(sft_file),
+            '--dpo_output_file', str(dpo_file),
+            '--summary_output_file', str(summary_file),
+            '--skip_sft',
+            '--skip_audit',
+            '--skip_summary',
+        ]
+        if args.summary_csv:
+            dpo_cmd.extend(['--summary_csv_file', str(summary_csv_file)])
+        if args.enable_reasoning_judge:
+            dpo_cmd.extend([
+                '--enable_reasoning_judge',
+                '--judge_provider', args.judge_provider,
+                '--judge_model', args.judge_model,
+                '--judge_prompt_file', args.judge_prompt_file,
+            ])
+        run_command(dpo_cmd)
 
     manifest = {
         'work_dir': str(work_dir),

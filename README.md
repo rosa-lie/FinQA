@@ -9,7 +9,7 @@
 **项目介绍**：**FinGPT-R1**：一款为金融数值推理领域设计的大语言模型，采用轻量化的 7B 参数量级架构。在降低部署成本的同时，该模型通过在针对金融推理场景的高质量思维链数据上采用 SFT（监督微调）和 RL（强化学习）训练，为模型在金融领域的应用提供了坚实的理论支撑、业务规则、决策逻辑以及技术实现能力，从而有效提升模型的金融复杂推理能力，为银行、证券、保险以及信托等金融核心业务场景提供有力支持。   
 
 **工作框架**：
-1. 基于 **DeepSeek-R1** 构建了数据蒸馏框架，并严格按照官方参数设定进行数据处理，采用两阶段数据筛选方法提升金融领域数据质量，生成了SFT数据集和RL数据集。
+1. 基于 **DeepSeek-R1** 构建了数据蒸馏框架，并按当前代码实现落地为“生成多候选、统一打分、组内选择 `chosen/rejected`、产出 SFT/DPO/audit”。其中 SFT 正样本严格依赖 `clean_response`，DPO 负样本允许来自非 clean 但可用的原始 candidate response，从而兼顾训练纯度与对比难度。
 2. 在训练过程中，利用**Qwen2.5-7B-Instruct**，通过监督微调（SFT）和强化学习（RL）训练金融推理大模型，以提升金融推理任务的准确性和泛化能力。
 
 
@@ -21,11 +21,9 @@
 
 **数据来源**：开源数据集包括**ConvFinQA** （陈等，2022），**FinQA** （陈等，2021）【Ant_Finance （支付宝团队，2023），FinanceIQ 独小漫DI 团队 （2023b），量化交易-指令 （FinanceQT） （Malik，2024）， Twitter-财经-新闻-情感 （TFNS） （匿名，2024），Finance-Instruct-500K （Flowers，2025），FinCorpus （独小漫DI 团队，2023a），和FinCUGE （Lu等，2023）】
 
-**数据构建**：为将 DeepSeek-R1 的推理能力迁移至金融场景并解决高质量金融推理数据问题，我们用Deepseek-R1（满血版）针对表格解析（FinQA）和多轮交互（ConvFinQA）等多个数据集进行领域知识蒸馏筛选，构建了约【】条面向专业金融推理场景的高质量Chains of Thought（CoT）数据集 Fin-R1-Data 。该数据集涵盖中英文金融垂直领域的多维度专业知识，并根据具体任务内容将其分为【】，可有效支撑银行、基金和证券等多个金融核心场景。本研究构建了基于 Deepseek-R1 的数据蒸馏框架，【并创新性提出对思维链进行“答案+推理”双轮质量打分筛选方法】，【首轮基于规则匹配和 Qwen2.5-72B-Instruct 对答案准确性评分】，次轮对推理链的逻辑一致性、术语合规性等推理逻辑进行深度校验以保证数据质量。
+**数据构建**：为将 DeepSeek-R1 的推理能力迁移到金融场景，我们围绕 FinQA 与 ConvFinQA 搭建了多候选蒸馏链路，目标不是直接学习 teacher 的所有输出，而是把可验证、可比较、适合 student 学习的 reasoning 候选沉淀为训练数据。当前框架的核心不再是把每一层打分单独当作硬门槛，而是先对候选统一计算 answer check、reasoning selection 与 `quality_score`，再在同题候选内做最终选择。
 
-**数据蒸馏**：先从 raw datasets 抽问题，用 DeepSeek-R1-671B 生成 reasoning path 和答案，温度设为 0.6；然后做两层过滤：
- - answer check：客观题直接比答案，主观题用 LLM-as-a-Judge
- - reasoning selection：再用 Qwen2.5-72B-Instruct 按 7 个维度筛 reasoning 质量
+**数据蒸馏**：teacher 会为同一题生成多个 reasoning 候选，`distill/score_distill_candidates.py` 再按当前规则完成组内筛选。`chosen` 只从带完整 `<think>/<answer>` 的 `clean_response` 候选中选择，并直接取组内最高分作为 distilled SFT 和 DPO 的正样本；`rejected` 则从同组剩余候选中选择最低分者，只要求能够提取出原始 candidate response，因此允许来自非 clean 候选。若整组没有可用 `chosen`，则该组不会进入 SFT、DPO、audit 或 summary 输出。
 
 **数据筛选**
 
@@ -68,12 +66,12 @@
 
 ### 当前金融推理子项目实际使用到的模块
 
-- **数据处理**：`financial_data_processors/*`、`clean_sharegpt_dataset.py`、`audit_sharegpt_dirty_samples.py`、`filter_sharegpt_by_audit.py`
-- **SFT 训练**：`supervised_finetuning.py`、`supervised_finetuning_accelerate.py`
-- **偏好优化 / 强化学习**：`dpo_training.py`、`financial_grpo_training.py`、`ppo_training.py`、`orpo_training.py`
-- **蒸馏**：`distill/*`
-- **评测**：`evaluate_financial_benchmarks.py`
-- **推理与服务**：`inference.py`、`gradio_demo.py`、`fastapi_server_demo.py`
+- **数据处理**：`domain/financial/processors/*`、`data/clean_sharegpt_dataset.py`、`data/audit_sharegpt_dirty_samples.py`、`data/filter_sharegpt_by_audit.py`
+- **SFT 训练**：`training/supervised_finetuning.py`、`training/supervised_finetuning_accelerate.py`
+- **偏好优化 / 强化学习**：`training/dpo_training.py`、`training/financial_grpo_training.py`、`training/ppo_training.py`、`training/orpo_training.py`
+- **蒸馏**：`domain/financial/distill/*`
+- **评测**：`evaluation/evaluate_financial_benchmarks.py`
+- **推理与服务**：`serving/inference.py`、`serving/gradio_demo.py`、`serving/fastapi_server_demo.py`
 
 这些框架共同组成了本项目的完整工作流：**数据构造 -> 蒸馏 -> SFT -> 偏好优化 / 强化学习 -> benchmark 评估 -> 部署推理**。
 
@@ -120,7 +118,11 @@ https://finqasite.github.io/ https://github.com/czyssrs/FinQA
      - 它的作用不是测“金融数值推理”，而是测：中文金融语义理解；中文金融术语/文本泛化；模型是否只会英文表格推理，而不会中文金融表达。
      - 所以它应该作为：“中文金融泛化补充 benchmark”
 
+
 参考
+
+[BUPT-FinanceReasoning](https://huggingface.co/datasets/BUPT-Reasoning-Lab/FinanceReasoning)
+
 
 https://www.modelscope.cn/datasets/tongyi_dianjin/CFLUE
 阿里云-通义点金与苏州大学联合推出了CFLUE（Chinese Financial Language Understanding Evaluation），这是一个新颖的、全面的评估基准，旨在评估大型语言模型在中文金融语境中的理解和处理能力。
@@ -155,10 +157,10 @@ https://huggingface.co/datasets/AdaptLLM/finance-tasks
 对应 `run_fingpt_min.ipynb` 第 2~5 节，完整流程为：
 
 1. 原始数据就绪（本地缓存/HF）
-2. `financial_data_router.py` 统一转为 SFT/DPO 格式
-3. `clean_sharegpt_dataset.py` 基础清洗  
-4. `audit_sharegpt_dirty_samples.py` 质量审计
-5. `filter_sharegpt_by_audit.py --mode strict` 严格过滤并落盘训练目录
+2. `domain/financial/financial_data_router.py` 统一转为 SFT/DPO 格式
+3. `data/clean_sharegpt_dataset.py` 基础清洗  
+4. `data/audit_sharegpt_dirty_samples.py` 质量审计
+5. `data/filter_sharegpt_by_audit.py --mode strict` 严格过滤并落盘训练目录
 
 ### 数据处理结果（Notebook 现有运行记录）
 
@@ -188,15 +190,20 @@ SFT2（ConvFinQA turn）：
 > 3. 把通过的候选变成：distilled SFT、distilled DPO、audit / verifier 数据；  
 > 4. benchmark 证明它比“非蒸馏 SFT”更好。
 
-我采用 **black-box response distillation** ，将高能力 teacher 的结构化推理轨迹迁移到学生模型，并通过自动验证机制控制监督质量。
-- 受 STaR 启发，我们不直接使用所有 teacher outputs，而是仅保留通过数值正确性、结构完整性与程序一致性校验的候选，构建高质量 reasoning distillation 数据集。
-- 参考Deepseek-R1以及相关复现项目Open-R1，落地到金融数值推理领域中。
+我采用 **black-box response distillation**，将高能力 teacher 的推理轨迹迁移到 student，并通过自动打分与组内选择机制控制监督质量。受 STaR 启发，我们不直接学习所有 teacher outputs，而是先统一对候选打分，再把每组里最高分的 clean 候选写入 distilled SFT，把最低分的其余可用候选写入 distilled DPO 的 rejected 侧。这样正样本保持干净，负样本保持可比，也避免把没有可用 `chosen` 的整组噪声样本带进训练集。
 
 Stage 1：用现有 processor 构造高一致性 prompt  
 Stage 2：teacher 生成多个 reasoning 候选  
-Stage 3：用 verifier / 规则做 outcome filtering  
-Stage 4：先做 distilled SFT  
-Stage 5：再把多候选转成 distilled DPO
+Stage 3：统一 scoring，并按组选择 `chosen/rejected`  
+Stage 4：产出 distilled SFT / DPO / audit  
+Stage 5：再用 benchmark 验证蒸馏收益
+
+
+存在的问题：
+1. distill方案：program-conditioned-distill
+2. distill-score：程序score & llm as judges?
+3. tied dpo: chosen和rejected差别不大 应该如何构造优秀的rejected？
+
 
 **reference：**
 

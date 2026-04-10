@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -21,6 +21,7 @@ ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)(?:\s*</answer>|$)", re.IGNORECASE 
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 THINK_TAG_RE = re.compile(r"<think>\s*(.*?)(?:\s*</think>|$)", re.IGNORECASE | re.DOTALL)
+FULL_TAGGED_RESPONSE_RE = re.compile(r"^\s*<think>\s*.*?\s*</think>\s*<answer>\s*.*?\s*</answer>\s*$", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?%?")
 JSON_LIKE_RE = re.compile(r'\{\s*"(?:text|table|value|content|sentence|evidence|gold_ind|gold_inds)')
 RUBRIC_FIELDS = [
@@ -32,7 +33,7 @@ RUBRIC_FIELDS = [
     "reasoning_completeness",
     "content_diversity",
 ]
-DEFAULT_JUDGE_PROMPT = Path("distill/prompts/financial_reasoning_judge.txt")
+DEFAULT_JUDGE_PROMPT = Path("domain/financial/distill/prompts/financial_reasoning_judge.txt")
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -62,6 +63,45 @@ def save_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+
+
+def extract_raw_message_content(row: Dict[str, Any]) -> str:
+    raw = row.get("raw_response") or {}
+    if not isinstance(raw, dict):
+        return ""
+    choices = raw.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "").strip()
+
+
+def is_full_tagged_response(text: str) -> bool:
+    return bool(FULL_TAGGED_RESPONSE_RE.match((text or "").strip()))
+
+
+def select_clean_response(row: Dict[str, Any]) -> Tuple[str, str]:
+    raw_content = extract_raw_message_content(row)
+    if is_full_tagged_response(raw_content):
+        return raw_content.strip(), "raw_content"
+    response = str(row.get("response") or "").strip()
+    teacher_backend = str(row.get("teacher_backend") or "")
+    if teacher_backend in {"gold", "copy_gold_final"} and is_full_tagged_response(response):
+        return response, "response_fallback"
+    return "", ""
+
+
+def select_candidate_response(row: Dict[str, Any]) -> Tuple[str, str]:
+    raw_content = extract_raw_message_content(row)
+    if raw_content:
+        return raw_content.strip(), "raw_content"
+    response = str(row.get("response") or "").strip()
+    if response:
+        return response, "response_fallback"
+    clean_response = str(row.get("clean_response") or "").strip()
+    if clean_response:
+        return clean_response, "clean_response"
+    return "", ""
 
 
 def extract_answer_body(text: str) -> str:
@@ -147,22 +187,24 @@ def operator_sequence(program_text: str) -> List[str]:
 
 
 def build_answer_check(row: Dict[str, Any], abs_tol: float, rel_tol: float) -> Dict[str, Any]:
-    response = str(row.get("response") or "").strip()
-    answer_text = extract_answer_body(response)
+    clean_response, clean_response_source = select_clean_response(row)
+    answer_text = extract_answer_body(clean_response)
     final_answer = extract_section(answer_text, FINAL_ANSWER_RE) or answer_text.strip().split("\n")[0].strip()
-    program_section = extract_section(response, PROGRAM_RE)
-    has_think = bool(THINK_TAG_RE.search(response))
-    has_answer = bool(ANSWER_TAG_RE.search(response))
-    format_ok = bool(has_think and has_answer and final_answer)
-    ans_ok = answer_correct(response, str(row.get("gold_answer") or ""), abs_tol, rel_tol)
+    program_section = extract_section(clean_response, PROGRAM_RE)
+    has_think = bool(THINK_TAG_RE.search(clean_response))
+    has_answer = bool(ANSWER_TAG_RE.search(clean_response))
+    format_ok = bool(clean_response and is_full_tagged_response(clean_response) and has_think and has_answer and final_answer)
+    ans_ok = answer_correct(final_answer, str(row.get("gold_answer") or ""), abs_tol, rel_tol) if final_answer else False
     gold_program = str(row.get("gold_program") or "").strip()
     prog_ok = program_consistent(program_section, gold_program)
-    evidence_hits = json_like_hits(response)
+    evidence_hits = json_like_hits(clean_response) if clean_response else 0
     operator_match = None
     if gold_program and program_section:
         operator_match = operator_sequence(program_section) == operator_sequence(gold_program)
     answer_check_pass = bool(format_ok and ans_ok and evidence_hits == 0)
     return {
+        "clean_response": clean_response,
+        "clean_response_source": clean_response_source,
         "final_answer": final_answer,
         "program_section": program_section,
         "has_think": has_think,
@@ -172,13 +214,13 @@ def build_answer_check(row: Dict[str, Any], abs_tol: float, rel_tol: float) -> D
         "program_consistent": prog_ok,
         "operator_sequence_match": operator_match,
         "evidence_json_like_hits": evidence_hits,
-        "response_chars": len(response),
+        "response_chars": len(clean_response),
         "answer_check_pass": answer_check_pass,
     }
 
 
 def heuristic_reasoning_scores(row: Dict[str, Any], answer_info: Dict[str, Any]) -> Dict[str, Any]:
-    response = str(row.get("response") or "")
+    response = str(row.get("clean_response") or row.get("response") or "")
     think_match = THINK_TAG_RE.search(response)
     think_text = think_match.group(1).strip() if think_match else ""
     program_section = answer_info.get("program_section") or ""
@@ -229,12 +271,12 @@ def build_judge_user_prompt(row: Dict[str, Any]) -> str:
         f"[PROMPT]\n{row.get('prompt', '')}",
         f"[GOLD_ANSWER]\n{row.get('gold_answer', '')}",
         f"[GOLD_PROGRAM]\n{row.get('gold_program', '')}",
-        f"[CANDIDATE_RESPONSE]\n{row.get('response', '')}",
+        f"[CANDIDATE_RESPONSE]\n{row.get('clean_response') or row.get('response', '')}",
     ])
 
 
 def create_judge_client(args: argparse.Namespace):
-    from role_play_data.llm_client import create_llm_client
+    from domain.roleplay.llm_client import create_llm_client
     client, model_name = create_llm_client(
         provider=args.judge_provider,
         api_key=args.judge_api_key,
@@ -314,12 +356,10 @@ def score_candidate(row: Dict[str, Any], args: argparse.Namespace, judge_prompt:
             "reasoning_selection_pass": False,
             "judge_backend": "skipped",
         })
-    eligible_sft = bool(answer_info["answer_check_pass"] and reasoning_info["reasoning_selection_pass"] and (answer_info.get("program_consistent") is True if args.require_program_match_for_positive and row.get("gold_program") else True))
     return {
         **row,
         **answer_info,
         **reasoning_info,
-        "eligible_sft": eligible_sft,
         "quality_score": final_quality(answer_info, reasoning_info),
     }
 
@@ -352,13 +392,15 @@ def build_sft_row(best: Dict[str, Any]) -> Dict[str, Any]:
         "metadata": metadata,
         "conversations": [
             {"from": "human", "value": best.get("prompt", "")},
-            {"from": "gpt", "value": best.get("response", "")},
+            {"from": "gpt", "value": best.get("clean_response", "")},
         ],
     }
 
 
 def build_dpo_row(chosen: Dict[str, Any], rejected: Dict[str, Any]) -> Dict[str, Any]:
     metadata = dict(chosen.get("metadata") or {})
+    rejected_response = str(rejected.get("clean_response") or "").strip()
+    rejected_response_source = "clean_response" if rejected_response else ""
     metadata.update({
         "chosen_teacher_model": chosen.get("teacher_model"),
         "rejected_teacher_model": rejected.get("teacher_model"),
@@ -370,37 +412,32 @@ def build_dpo_row(chosen: Dict[str, Any], rejected: Dict[str, Any]) -> Dict[str,
         "rejected_answer_check_pass": rejected.get("answer_check_pass"),
         "chosen_reasoning_selection_pass": chosen.get("reasoning_selection_pass"),
         "rejected_reasoning_selection_pass": rejected.get("reasoning_selection_pass"),
+        "rejected_response_source": rejected_response_source,
     })
     return {
         "system": "",
         "history": [],
         "question": chosen.get("prompt", ""),
-        "response_chosen": chosen.get("response", ""),
-        "response_rejected": rejected.get("response", ""),
+        "response_chosen": chosen.get("clean_response", ""),
+        "response_rejected": rejected_response,
         "source_dataset": chosen.get("source_dataset"),
         "record_id": chosen.get("record_id"),
         "metadata": metadata,
     }
 
 
-def pick_best(rows: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    positives = [row for row in rows if row.get("eligible_sft")]
-    pool = positives or list(rows)
-    if not pool:
+def pick_best(rows: Sequence[Dict[str, Any]], args: argparse.Namespace) -> Optional[Dict[str, Any]]:
+    clean_candidates = [row for row in rows if row.get("clean_response")]
+    if not clean_candidates:
         return None
-    return sorted(pool, key=lambda row: (row.get("quality_score", 0.0), -int(not row.get("answer_check_pass", False)), -int(not row.get("reasoning_selection_pass", False))), reverse=True)[0]
+    return sorted(clean_candidates, key=lambda row: row.get("quality_score", 0.0), reverse=True)[0]
 
 
 def pick_rejected(rows: Sequence[Dict[str, Any]], chosen: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    candidates = [row for row in rows if row.get("response") and row.get("response") != chosen.get("response")]
-    if not candidates:
+    clean_candidates = [row for row in rows if row is not chosen and row.get("clean_response")]
+    if not clean_candidates:
         return None
-    bad_first = sorted(candidates, key=lambda row: (
-        row.get("answer_check_pass") is True,
-        row.get("reasoning_selection_pass") is True,
-        row.get("answer_correct") is True,
-        row.get("quality_score", 0.0),
-    ))
+    bad_first = sorted(clean_candidates, key=lambda row: row.get("quality_score", 0.0))
     return bad_first[0]
 
 
@@ -412,6 +449,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpo_output_file", type=str, required=True)
     parser.add_argument("--summary_output_file", type=str, default="")
     parser.add_argument("--summary_csv_file", type=str, default="")
+    parser.add_argument("--skip_sft", action="store_true")
+    parser.add_argument("--skip_dpo", action="store_true")
+    parser.add_argument("--skip_audit", action="store_true")
+    parser.add_argument("--skip_summary", action="store_true")
     parser.add_argument("--numeric_abs_tol", type=float, default=1e-4)
     parser.add_argument("--numeric_rel_tol", type=float, default=1e-4)
     parser.add_argument("--require_program_match_for_positive", action="store_true")
@@ -434,7 +475,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     candidates = load_jsonl(Path(args.input_file))
-    judge_prompt = Path(args.judge_prompt_file).read_text(encoding="utf-8").strip() if args.judge_prompt_file else ""
+    judge_prompt = Path(args.judge_prompt_file).read_text(encoding="utf-8").strip() if (args.enable_reasoning_judge and args.judge_prompt_file) else ""
     client_bundle = create_judge_client(args) if args.enable_reasoning_judge else None
     scored = [score_candidate(row, args, judge_prompt, client_bundle) for row in candidates]
 
@@ -442,20 +483,28 @@ def main() -> None:
     for row in scored:
         grouped.setdefault(group_key(row), []).append(row)
 
+    kept_scored: List[Dict[str, Any]] = []
     sft_rows: List[Dict[str, Any]] = []
     dpo_rows: List[Dict[str, Any]] = []
     summary_rows: List[Dict[str, Any]] = []
     answer_check_pass_count = 0
     reasoning_pass_count = 0
+    dropped_record_count = 0
+    dropped_all_invalid_response_records = 0
 
     for key, rows in grouped.items():
-        chosen = pick_best(rows)
-        rejected = pick_rejected(rows, chosen) if chosen else None
+        chosen = pick_best(rows, args)
+        if not chosen:
+            dropped_record_count += 1
+            dropped_all_invalid_response_records += 1
+            continue
+
+        rejected = pick_rejected(rows, chosen)
+        kept_scored.extend(rows)
         answer_check_pass_count += sum(1 for row in rows if row.get("answer_check_pass"))
         reasoning_pass_count += sum(1 for row in rows if row.get("reasoning_selection_pass"))
-        if chosen and chosen.get("eligible_sft"):
-            sft_rows.append(build_sft_row(chosen))
-        if chosen and rejected:
+        sft_rows.append(build_sft_row(chosen))
+        if rejected:
             dpo_rows.append(build_dpo_row(chosen, rejected))
         summary_row = {
             "source_dataset": key[0],
@@ -466,8 +515,9 @@ def main() -> None:
             "num_reasoning_selection_pass": sum(1 for row in rows if row.get("reasoning_selection_pass")),
             "num_answer_correct": sum(1 for row in rows if row.get("answer_correct")),
             "num_program_consistent": sum(1 for row in rows if row.get("program_consistent") is True),
-            "num_eligible_sft": sum(1 for row in rows if row.get("eligible_sft")),
+            "num_clean_response": sum(1 for row in rows if row.get("clean_response")),
             "chosen_candidate_index": chosen.get("candidate_index") if chosen else None,
+            "chosen_clean_response_source": chosen.get("clean_response_source") if chosen else None,
             "chosen_quality_score": chosen.get("quality_score") if chosen else None,
             "chosen_answer_check_pass": chosen.get("answer_check_pass") if chosen else None,
             "chosen_reasoning_selection_pass": chosen.get("reasoning_selection_pass") if chosen else None,
@@ -478,22 +528,28 @@ def main() -> None:
             summary_row[f"chosen_{field}"] = chosen.get(field) if chosen else None
         summary_rows.append(summary_row)
 
-    save_jsonl(Path(args.audit_output_file), scored)
-    save_jsonl(Path(args.sft_output_file), sft_rows)
-    save_jsonl(Path(args.dpo_output_file), dpo_rows)
-    if args.summary_output_file:
+    if not args.skip_audit:
+        save_jsonl(Path(args.audit_output_file), kept_scored)
+
+    if not args.skip_sft:
+        save_jsonl(Path(args.sft_output_file), sft_rows)
+    if not args.skip_dpo:
+        save_jsonl(Path(args.dpo_output_file), dpo_rows)
+    if args.summary_output_file and not args.skip_summary:
         save_jsonl(Path(args.summary_output_file), summary_rows)
-    if args.summary_csv_file:
+    if args.summary_csv_file and not args.skip_summary:
         save_csv(Path(args.summary_csv_file), summary_rows)
 
     print(json.dumps({
         "input_rows": len(candidates),
-        "audit_rows": len(scored),
+        "audit_rows": len(kept_scored),
         "grouped_records": len(grouped),
         "answer_check_pass_rows": answer_check_pass_count,
         "reasoning_selection_pass_rows": reasoning_pass_count,
         "sft_rows": len(sft_rows),
         "dpo_rows": len(dpo_rows),
+        "dropped_records": dropped_record_count,
+        "dropped_all_invalid_response_records": dropped_all_invalid_response_records,
         "reasoning_judge_enabled": args.enable_reasoning_judge,
     }, ensure_ascii=False, indent=2))
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -16,9 +16,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Tuple
 
-from financial_data_processors.common import iter_records
-from financial_data_processors.common import summarize_evidence_blocks
-from financial_data_processors.families import FAMILY_MODULES
+from domain.financial.processors.common import iter_records
+from domain.financial.processors.common import summarize_evidence_blocks
+from domain.financial.processors.families import FAMILY_MODULES
 
 ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"最终答案：\s*(.+)", re.DOTALL)

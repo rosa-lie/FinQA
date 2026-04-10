@@ -39,12 +39,12 @@ https://huggingface.co/datasets/AdaptLLM/ConvFinQA/:
 
 当前数据处理已统一为“**单入口路由 + family 独立处理器**”：
 
-- 统一入口：`financial_data_router.py`
+- 统一入口：`domain/financial/financial_data_router.py`
 - 路由参数：
   - `--task {sft,dpo}`
   - `--dataset_family {convfinqa_turn,finqa,fineval,fiqa_qa,auto}`
   - `--source_file / --output_file`
-- family 处理器目录：`financial_data_processors/families/`
+- family 处理器目录：`domain/financial/processors/families/`
 
 ### 处理规则
 
@@ -128,7 +128,7 @@ SFT v2 的目标是先修正监督信号，再重新比较 `SFT-1 / SFT-2 / Join
 
 ## 2. 标准样本格式
 
-DPO 样本输出为 JSONL，每行一个 pair，字段固定如下（与 `financial_data_router.py --task dpo` 对齐）：
+DPO 样本输出为 JSONL，每行一个 pair，字段固定如下（与 `python -m domain.financial.financial_data_router --task dpo` 对齐）：
 
 ```json
 {
@@ -146,7 +146,7 @@ DPO 样本输出为 JSONL，每行一个 pair，字段固定如下（与 `financ
 - `question`：来自 family 模板化后的 user prompt。
 - `response_chosen`：来自 SFT gold 路径（同一条样本的高质量回答）。
 - `response_rejected`：由 family 规则构造的“可回答、可比较、但质量更差”回答。
-- 训练消费侧字段映射：`dpo_training.py` 读取 `system/history/question/response_chosen/response_rejected` 并转为 `prompt/chosen/rejected`。
+- 训练消费侧字段映射：`training/dpo_training.py` 读取 `system/history/question/response_chosen/response_rejected` 并转为 `prompt/chosen/rejected`。
 
 ## 3. rejected 生成规则（v1）
 
@@ -208,7 +208,7 @@ v1 采用三档难度标注口径（用于抽样与验收）：
 
 ```bash
 # 1) raw -> dpo jsonl
-python financial_data_router.py \
+python -m domain.financial.financial_data_router \
   --task dpo \
   --source_file <raw.json|raw.jsonl> \
   --output_file <dpo_pairs.jsonl> \
@@ -216,14 +216,14 @@ python financial_data_router.py \
   --seed 42
 
 # 2) 训练消费（示例）
-python dpo_training.py --train_file_dir <dpo_dir> ...
+python -m training.dpo_training --train_file_dir <dpo_dir> ...
 ```
 
-流程定义：`raw -> financial_data_router.py --task dpo -> dpo jsonl -> summary 统计报告 -> dpo_training.py`
+流程定义：`raw -> python -m domain.financial.financial_data_router --task dpo -> dpo jsonl -> summary 统计报告 -> python -m training.dpo_training`
 
 ### 6.2 summary 字段解释
 
-路由输出统计以 `financial_data_processors/router.py` 为准：
+路由输出统计以 `domain/financial/processors/router.py` 为准：
 
 - 全局：`task, output_file, dataset_family, input_rows, saved_rows, skipped_rows, per_family`
 - `convfinqa_turn` 额外：`group_count, dedup_dropped_rows, fallback_selected_rows`
