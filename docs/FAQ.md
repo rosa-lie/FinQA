@@ -1,6 +1,6 @@
 #### 问：报错"NotImplementedError: Cannot copy out of meta tensor; no data!"
 答：单卡显存不足，device_map='auto'在gpu占满下，会自动利用cpu加载模型，导致`_move_model_to_device`错误。
-解决方法：指定多卡训练，参考`CUDA_VISIBLE_DEVICES=0,1,2,3 python supervised_finetuning.py ...`，把batch size调大，显存打满，跟数据并行一样能最大化利用显卡加速训练。参考[issues 4](https://github.com/shibing624/MedicalGPT/issues/4)
+解决方法：指定多卡训练，参考`CUDA_VISIBLE_DEVICES=0,1,2,3 python -m training.supervised_finetuning ...`，把batch size调大，显存打满，跟数据并行一样能最大化利用显卡加速训练。参考[issues 4](https://github.com/shibing624/MedicalGPT/issues/4)
 
 
 #### 问：chatglm，baichuan模型用LoRA（peft）训练，合并时报错

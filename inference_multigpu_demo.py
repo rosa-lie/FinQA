@@ -1,1 +1,0 @@
-serving/inference_multigpu_demo.py

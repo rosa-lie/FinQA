@@ -4,7 +4,7 @@
 @description: api start demo
 
 usage:
-CUDA_VISIBLE_DEVICES=0 python fastapi_server_demo.py --base_model bigscience/bloom-560m
+CUDA_VISIBLE_DEVICES=0 python -m serving.fastapi_server_demo --base_model bigscience/bloom-560m
 
 curl -X 'POST' 'http://0.0.0.0:8008/chat' \
   -H 'accept: application/json' \

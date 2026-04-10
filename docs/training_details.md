@@ -17,7 +17,6 @@ tips：PT阶段是可选项，请慎重处理。
 Continue pretraining of the base llama-7b model to create llama-7b-pt:
 
 ```shell
-cd scripts
 sh run_pt.sh
 ```
 
@@ -33,7 +32,6 @@ sh run_pt.sh
 Supervised fine-tuning of the base llama-7b-pt model to create llama-7b-sft
 
 ```shell
-cd scripts
 sh run_sft.sh
 ```
 
@@ -57,7 +55,6 @@ RM模型是通过人工标注SFT模型的打分结果来训练的，目的是取
 Reward modeling using dialog pairs from the reward dataset using the llama-7b-sft to create llama-7b-reward:
 
 ```shell
-cd scripts
 sh run_rm.sh
 ```
 [训练参数说明](https://github.com/shibing624/MedicalGPT/blob/main/docs/training_params.md)
@@ -83,7 +80,6 @@ Reinforcement Learning fine-tuning of llama-7b-sft with the llama-7b-reward rewa
 
 ```shell
 pip install git+https://github.com/lvwerra/trl
-cd scripts
 sh run_ppo.sh
 ```
 

@@ -4,7 +4,7 @@
 @description:
 
 Usage:
-python merge_peft_adapter.py \
+python -m tooling.merge_peft_adapter \
     --base_model path/to/llama/model \
     --tokenizer_path path/to/llama/tokenizer \
     --lora_model path/to/lora/model \

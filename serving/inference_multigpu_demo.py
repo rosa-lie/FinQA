@@ -4,7 +4,7 @@
 @description: use torchrun to inference with multi-gpus
 
 usage:
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 inference_multigpu_demo.py --base_model bigscience/bloom-560m
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 serving/inference_multigpu_demo.py --base_model bigscience/bloom-560m
 """
 import argparse
 import json

@@ -46,7 +46,7 @@ Supervised Finetuning, RLHF(Reward Modeling and Reinforcement Learning) and DPO(
 
 [2024/01/26] v1.8版本：支持微调Mixtral混合专家MoE模型 **[Mixtral 8x7B](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)**。详见[Release-v1.8](https://github.com/shibing624/MedicalGPT/releases/tag/1.8.0)
 
-[2024/01/14] v1.7版本：新增检索增强生成(RAG)的基于文件问答[ChatPDF](https://github.com/shibing624/ChatPDF)功能，代码`chatpdf.py`，可以基于微调后的LLM结合知识库文件问答提升行业问答准确率。详见[Release-v1.7](https://github.com/shibing624/MedicalGPT/releases/tag/1.7.0)
+[2024/01/14] v1.7版本：新增检索增强生成(RAG)的基于文件问答[ChatPDF](https://github.com/shibing624/ChatPDF)功能，代码`serving/chatpdf.py`，可以基于微调后的LLM结合知识库文件问答提升行业问答准确率。详见[Release-v1.7](https://github.com/shibing624/MedicalGPT/releases/tag/1.7.0)
 
 [2023/10/23] v1.6版本：新增RoPE插值来扩展GPT模型的上下文长度；针对LLaMA模型支持了[FlashAttention-2](https://github.com/Dao-AILab/flash-attention)和[LongLoRA](https://github.com/dvlab-research/LongLoRA) 提出的 **$S^2$-Attn**；支持了[NEFTune](https://github.com/neelsjain/NEFTune)给embedding加噪训练方法。详见[Release-v1.6](https://github.com/shibing624/MedicalGPT/releases/tag/1.6.0)
 
@@ -103,7 +103,7 @@ Supervised Finetuning, RLHF(Reward Modeling and Reinforcement Learning) and DPO(
 
 启动服务，命令如下：
 ```shell
-CUDA_VISIBLE_DEVICES=0 python gradio_demo.py --base_model path_to_llama_hf_dir --lora_model path_to_lora_dir
+CUDA_VISIBLE_DEVICES=0 python -m serving.gradio_demo --base_model path_to_llama_hf_dir --lora_model path_to_lora_dir
 ```
 
 参数说明：
@@ -146,16 +146,16 @@ Training Stage:
 
 | Stage                          | Introduction | Python script                                                                                           | Shell script                                                                  |
 |:-------------------------------|:-------------|:--------------------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------|
-| Continue Pretraining           | 增量预训练        | [pretraining.py](https://github.com/shibing624/MedicalGPT/blob/main/pretraining.py)                     | [run_pt.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_pt.sh)     |
-| Supervised Fine-tuning         | 有监督微调        | [supervised_finetuning.py](https://github.com/shibing624/MedicalGPT/blob/main/supervised_finetuning.py) | [run_sft.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_sft.sh)   |
-| Direct Preference Optimization | 直接偏好优化       | [dpo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/dpo_training.py)                   | [run_dpo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_dpo.sh)   |
-| Reward Modeling                | 奖励模型建模       | [reward_modeling.py](https://github.com/shibing624/MedicalGPT/blob/main/reward_modeling.py)             | [run_rm.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_rm.sh)     |
-| Reinforcement Learning         | 强化学习         | [ppo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/ppo_training.py)                   | [run_ppo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_ppo.sh)   |
-| ORPO                           | 概率偏好优化       | [orpo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/orpo_training.py)                  | [run_orpo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_orpo.sh) |
+| Continue Pretraining           | 增量预训练        | [training/pretraining.py](https://github.com/shibing624/MedicalGPT/blob/main/training/pretraining.py)                     | [run_pt.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_pt.sh)     |
+| Supervised Fine-tuning         | 有监督微调        | [training/supervised_finetuning.py](https://github.com/shibing624/MedicalGPT/blob/main/training/supervised_finetuning.py) | [run_sft.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_sft.sh)   |
+| Direct Preference Optimization | 直接偏好优化       | [training/dpo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/training/dpo_training.py)                   | [run_dpo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_dpo.sh)   |
+| Reward Modeling                | 奖励模型建模       | [training/reward_modeling.py](https://github.com/shibing624/MedicalGPT/blob/main/training/reward_modeling.py)             | [run_rm.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_rm.sh)     |
+| Reinforcement Learning         | 强化学习         | [training/ppo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/training/ppo_training.py)                   | [run_ppo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_ppo.sh)   |
+| ORPO                           | 概率偏好优化       | [training/orpo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/training/orpo_training.py)                  | [run_orpo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_orpo.sh) |
 
 - 提供完整PT+SFT+DPO全阶段串起来训练的pipeline：[run_training_dpo_pipeline.ipynb](https://github.com/shibing624/MedicalGPT/blob/main/run_training_dpo_pipeline.ipynb) ，其对应的colab： [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shibing624/MedicalGPT/blob/main/run_training_dpo_pipeline.ipynb)，运行完大概需要15分钟
 - 提供完整PT+SFT+RLHF全阶段串起来训练的pipeline：[run_training_ppo_pipeline.ipynb](https://github.com/shibing624/MedicalGPT/blob/main/run_training_ppo_pipeline.ipynb) ，其对应的colab： [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shibing624/MedicalGPT/blob/main/run_training_ppo_pipeline.ipynb) ，运行完大概需要20分钟
-- 提供基于知识库文件的LLM问答功能（RAG）：[chatpdf.py](https://github.com/shibing624/MedicalGPT/blob/main/chatpdf.py)
+- 提供基于知识库文件的LLM问答功能（RAG）：[serving/chatpdf.py](https://github.com/shibing624/MedicalGPT/blob/main/serving/chatpdf.py)
 - [训练参数说明](https://github.com/shibing624/MedicalGPT/blob/main/docs/training_params.md) | [训练参数说明wiki](https://github.com/shibing624/MedicalGPT/wiki/%E8%AE%AD%E7%BB%83%E5%8F%82%E6%95%B0%E8%AF%B4%E6%98%8E)
 - [数据集](https://github.com/shibing624/MedicalGPT/blob/main/docs/datasets.md) | [数据集wiki](https://github.com/shibing624/MedicalGPT/wiki/%E6%95%B0%E6%8D%AE%E9%9B%86)
 - [扩充词表](https://github.com/shibing624/MedicalGPT/blob/main/docs/extend_vocab.md) | [扩充词表wiki](https://github.com/shibing624/MedicalGPT/wiki/%E6%89%A9%E5%85%85%E4%B8%AD%E6%96%87%E8%AF%8D%E8%A1%A8)
@@ -194,7 +194,7 @@ Training Stage:
 训练完成后，现在我们加载训练好的模型，验证模型生成文本的效果。
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python inference.py \
+CUDA_VISIBLE_DEVICES=0 python -m serving.inference \
     --base_model path_to_model_hf_dir \
     --lora_model path_to_lora \
     --interactive
@@ -217,7 +217,7 @@ CUDA_VISIBLE_DEVICES=0 python inference.py \
 #### 多卡推理
 多卡数据并行，batch推理
 ```shell
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 inference_multigpu_demo.py --base_model shibing624/vicuna-baichuan-13b-chat
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 serving/inference_multigpu_demo.py --base_model shibing624/vicuna-baichuan-13b-chat
 ```
 #### vllm多卡部署
 ```shell

@@ -1,7 +1,7 @@
 # Requirement:
 #   pip install openai
 # Usage:
-#   python openai_api.py
+#   python -m serving.openai_api
 # Visit http://localhost:8000/docs for documents.
 
 import base64

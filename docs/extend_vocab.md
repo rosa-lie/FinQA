@@ -4,12 +4,12 @@
 ## 构建 tokenizer
 1. 首先在大规模中英文领域语料上训练 SPM，词表大小依据训练集指定，一般大于2000，使tokenizer可以完整切分`病毒`、`感染`、`慕容复`等领域词
 
-- 训练脚本：https://github.com/shibing624/MedicalGPT/blob/main/build_domain_tokenizer.py
+- 训练脚本：https://github.com/shibing624/MedicalGPT/blob/main/tooling/build_domain_tokenizer.py
 - sentencepiece训练参考：https://github.com/google/sentencepiece/blob/master/python/sentencepiece_python_module_example.ipynb
 
 2. 扩充百川中文词表，该词表中文识字率较高，用于提高简繁体汉字的识字率；根据[结巴分词](https://github.com/fxsjy/jieba)词频前20000的词表扩充中文词，提高专名切分效果
 
-- 合并词表脚本：https://github.com/shibing624/MedicalGPT/blob/main/merge_tokenizers.py
+- 合并词表脚本：https://github.com/shibing624/MedicalGPT/blob/main/tooling/merge_tokenizers.py
 
 效果示例：
 
