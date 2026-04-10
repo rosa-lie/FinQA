@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
+ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--judge_api_key', type=str, default=None)
     parser.add_argument('--judge_base_url', type=str, default=None)
     parser.add_argument('--judge_model', type=str, default=None)
-    parser.add_argument('--judge_prompt_file', type=str, default='domain/financial/distill/prompts/financial_reasoning_judge.txt')
+    parser.add_argument('--judge_prompt_file', type=str, default='distill/prompts/financial_reasoning_judge.txt')
     parser.add_argument('--judge_max_tokens', type=int, default=256)
     parser.add_argument('--reasoning_total_threshold', type=int, default=8)
     parser.add_argument('--reasoning_min_instruction_alignment', type=int, default=1)
@@ -121,7 +121,7 @@ def main() -> None:
 
         cmd = [
             sys.executable,
-            '-m', 'domain.financial.distill.score_distill_candidates',
+            '-m', 'distill.score_distill_candidates',
             '--input_file', str(part),
             '--audit_output_file', str(audit_file),
             '--sft_output_file', str(sft_file),
@@ -163,7 +163,7 @@ def main() -> None:
             rejected_file = rejected_dir / f'{stem}.rejected.jsonl'
             rejected_cmd = [
                 sys.executable,
-                '-m', 'domain.financial.distill.build_rejected_candidates',
+                '-m', 'distill.build_rejected_candidates',
                 '--input_file', str(audit_file),
                 '--output_file', str(rejected_file),
                 '--modes', args.synthetic_rejected_modes,
@@ -178,7 +178,7 @@ def main() -> None:
 
             dpo_cmd = [
                 sys.executable,
-                '-m', 'domain.financial.distill.score_distill_candidates',
+                '-m', 'distill.score_distill_candidates',
                 '--input_file', str(merged_file),
                 '--audit_output_file', str(audit_file),
                 '--sft_output_file', str(sft_file),

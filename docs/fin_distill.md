@@ -21,7 +21,7 @@
 
 | 外部论文/项目                              | 核心思想                                                        | 对项目最对应的模块                                                | 该怎么借                                                                          | 预期收益                           | 当前优先级     |
 | ------------------------------------ | ----------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------ | --------- |
-| **STaR (2022)**                      | 生成 reasoning，只保留**最终答对**的 rationale 再继续训练                   | `domain/financial/distill/distill_with_teacher.py` + `domain/financial/distill/score_distill_candidates.py` | 不要“teacher 说什么都学”，而是保留 **答案正确 + 结构完整 + 程序一致** 的候选进 SFT                         | 提高蒸馏数据纯度，减少 teacher 噪声         | **最高**    |
+| **STaR (2022)**                      | 生成 reasoning，只保留**最终答对**的 rationale 再继续训练                   | `distill/distill_with_teacher.py` + `distill/score_distill_candidates.py` | 不要“teacher 说什么都学”，而是保留 **答案正确 + 结构完整 + 程序一致** 的候选进 SFT                         | 提高蒸馏数据纯度，减少 teacher 噪声         | **最高**    |
 | **Distilling Step-by-Step (2023)**   | 用 **rationale / step-by-step** 作为额外监督，小模型更容易学会任务            |  `问题分析 / 关键证据 / 推理程序 / 最终答案` 四段式 target                 | 保持四段式结构，不要退化成只学 `最终答案`；后续可做“去掉某一段”的消融实验                                        | 提高 student 对中间推理链的学习能力         | **最高**    |
 | **DeepSeek-R1 (2025)**               | 先把 reasoning teacher 做强，再蒸到小模型；公开了 distilled dense models   | 未来的 “更强 teacher → 蒸 student” 路线                          | 现在可先用强 API / 强 checkpoint 做 teacher；后面若有更强 GRPO teacher，再二次蒸馏                 | 给提供“reasoning 小模型靠蒸馏是主流路线”的依据 | **高**     |
 | **Open-R1 (2025)**                   | 把 R1 的蒸馏、SFT、RL 训练 recipe 做成开源链路，且第一步就是蒸 R1-Distill         |  `build -> generate -> score -> train` 工程链路             | 参考其 synthetic reasoning data 的组织方式、生成和训练解耦方式、数据版本化                             | 帮把蒸馏从“想法”升级成规范工程流程            | **高**     |
@@ -32,9 +32,9 @@
 
 | 当前项目模块                              | 最该参考的外部工作                  | 为什么最像                                                                    | 应该具体加什么                                                                                        |
 | ------------------------------------ | -------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `domain/financial/distill/build_financial_distill_dataset.py` | Open-R1                    | Open-R1 很强调把生成和训练前处理解耦，先构造高质量 distill corpus，再独立训练                       | 给每条样本补足 `task_name / source_dataset / record_id / gold_answer / gold_program / prompt_len` 等元信息 |
-| `domain/financial/distill/distill_with_teacher.py`            | STaR + Open-R1             | 一个强调多轮生成后只保留对的，一个强调高质量 reasoning corpus 生产                               | 每题保留 3–5 个候选；同时记录温度、teacher 名称、采样轮次                                                             |
-| `domain/financial/distill/score_distill_candidates.py`        | STaR                       | 核心就是“不是所有 rationale 都值得学”                                                | 先统一打分，再按组直接选 `chosen/rejected`；没有可用 `chosen` 的整组样本直接丢弃                                           |
+| `distill/build_financial_distill_dataset.py` | Open-R1                    | Open-R1 很强调把生成和训练前处理解耦，先构造高质量 distill corpus，再独立训练                       | 给每条样本补足 `task_name / source_dataset / record_id / gold_answer / gold_program / prompt_len` 等元信息 |
+| `distill/distill_with_teacher.py`            | STaR + Open-R1             | 一个强调多轮生成后只保留对的，一个强调高质量 reasoning corpus 生产                               | 每题保留 3–5 个候选；同时记录温度、teacher 名称、采样轮次                                                             |
+| `distill/score_distill_candidates.py`        | STaR                       | 核心就是“不是所有 rationale 都值得学”                                                | 先统一打分，再按组直接选 `chosen/rejected`；没有可用 `chosen` 的整组样本直接丢弃                                           |
 | 蒸馏版 SFT 数据                           | Distilling Step-by-Step    | 该论文强调 rationale supervision 的价值                                          | 当前训练目标收敛为 `<think>/<answer>`；SFT 仅使用高分 `clean_response`                                                 |
 | 蒸馏版 DPO 数据                           | Open-R1 / DeepSeek-R1 思路延伸 | 多候选 reasoning 非常适合筛 chosen/rejected                                      | `chosen` 取组内最高分 clean 候选，`rejected` 取其余可用 response 中最低分候选                                          |
 | 未来 GRPO 后再蒸                          | DeepSeek-R1 + RL-aware KD  | R1 的 distilled dense models 证明了“teacher 强了再蒸”是有效路线；RL-aware KD 说明这还是研究热点 | 先作为 roadmap，不要现在主攻                                                                              |
@@ -180,7 +180,7 @@ Fin-R1-Data 共 60,091 条，中英双语，分为四类： financial advanced b
   - alignment with task instructions
 - 只保留高质量 reasoning 进入 SFT
 
-> 启发：两段式filtering校验（答案校验；reasoning 质量校验）；`domain/financial/distill/score_distill_candidates.py` 下一版应从“单一 quality score”升级为“多维 rubric 打分”
+> 启发：两段式filtering校验（答案校验；reasoning 质量校验）；`distill/score_distill_candidates.py` 下一版应从“单一 quality score”升级为“多维 rubric 打分”
 
 **训练流程：**
 1. `SFT`：用高质量 CoT 样本训练模型学会先思考再回答
@@ -207,9 +207,9 @@ Fin-R1 评估用了五个代表性金融数据集： `FinQA` `ConvFinQA` `Ant-Fi
 ## PLAN
 
 - 还没有把蒸馏 section 接入 `run_fingpt_min.ipynb`
-- `domain/financial/distill/score_distill_candidates.py` 的 program 一致性目前仍以字符串/算子序列为主，后续可继续加强为 AST 级比较
+- `distill/score_distill_candidates.py` 的 program 一致性目前仍以字符串/算子序列为主，后续可继续加强为 AST 级比较
 - `LLM-as-a-Judge` 路径已预留接口，但还没有在真实 `DeepSeek-R1 -> judge` 流程上跑完整小样本实验
-- `domain/financial/distill/decontaminate_financial_distill.py` 目前还是轻量 n-gram overlap 版本，还不是 open-r1 那种更完整的分布式去污流程
+- `distill/decontaminate_financial_distill.py` 目前还是轻量 n-gram overlap 版本，还不是 open-r1 那种更完整的分布式去污流程
 
 0. 配置`.env`
 1. deepseek-r1蒸馏链路
@@ -219,9 +219,9 @@ Fin-R1 评估用了五个代表性金融数据集： `FinQA` `ConvFinQA` `Ant-Fi
 
 ### DeepSeek-R1 teacher
 
-- 已把 `deepseek` provider 接入 `domain/roleplay/llm_client.py`
+- 已把 `deepseek` provider 接入 `role_play_data/llm_client.py`
 - 默认模型设为 `deepseek-reasoner`，可作为 `DeepSeek-R1` teacher 使用
-- `domain/financial/distill/distill_with_teacher.py` 可直接通过以下参数调用：
+- `distill/distill_with_teacher.py` 可直接通过以下参数调用：
   - `--backend openai --provider deepseek`
   - 或设置 `DEEPSEEK_API_KEY` 后省略 `--provider`，由 client 自动检测
 - 当前建议先用 `FinQA` 小样本验证 `DeepSeek-R1` 的结构稳定性和数值正确率，再扩展到 `ConvFinQA`
@@ -234,7 +234,7 @@ Fin-R1 评估用了五个代表性金融数据集： `FinQA` `ConvFinQA` `Ant-Fi
   - 对齐 open-r1 里单题多候选生成的思路，便于后续做 chosen/rejected 选择
 - 默认 `temperature=0.6`
   - 对齐 open-r1 的 teacher 生成温度设定，优先获得较丰富的 reasoning 候选
-- 新增 `domain/financial/distill/prompts/financial_distill_teacher_user.txt`
+- 新增 `distill/prompts/financial_distill_teacher_user.txt`
   - 对齐 open-r1 的模板化 user prompt 思路，把 teacher 输入包装成统一的 distillation prompt
   - teacher 输出现在要求使用 `<think>` / `<answer>` 标签
 
@@ -246,10 +246,10 @@ Fin-R1 评估用了五个代表性金融数据集： `FinQA` `ConvFinQA` `Ant-Fi
 
 ### DeepSeek-R1 smoke + notebook 接入
 
-- `domain/roleplay/llm_client.py` 已补标准库 `.env` 加载与 `OpenAI-compatible HTTP fallback`，即使环境里没有 `openai` Python 包，也可以直接使用 `.env` 中的 `DEEPSEEK_API_KEY` 调用 `deepseek-reasoner`。
-- `domain/financial/distill/distill_with_teacher.py` 已兼容 `deepseek-reasoner` 的返回形态：生成阶段会优先合并 `reasoning_content + content`，再包装成带 `<think>/<answer>` 的 `response`。但 scoring 阶段不会直接把这个合并结果当成训练目标，而是优先回到 `raw_response.choices[0].message.content` 提取 `clean_response` 与 candidate response；因此当前 `response` 更接近兜底与调试字段，而不是 SFT/DPO 的首选来源。
+- `role_play_data/llm_client.py` 已补标准库 `.env` 加载与 `OpenAI-compatible HTTP fallback`，即使环境里没有 `openai` Python 包，也可以直接使用 `.env` 中的 `DEEPSEEK_API_KEY` 调用 `deepseek-reasoner`。
+- `distill/distill_with_teacher.py` 已兼容 `deepseek-reasoner` 的返回形态：生成阶段会优先合并 `reasoning_content + content`，再包装成带 `<think>/<answer>` 的 `response`。但 scoring 阶段不会直接把这个合并结果当成训练目标，而是优先回到 `raw_response.choices[0].message.content` 提取 `clean_response` 与 candidate response；因此当前 `response` 更接近兜底与调试字段，而不是 SFT/DPO 的首选来源。
 - 实际 smoke test 已跑通：
-  - 命令：`python -m domain.financial.distill.run_financial_distill_pipeline --source_spec finqa=/root/autodl-tmp/data/financial_reasoning/raw/finqa/dev.json --work_dir /root/autodl-tmp/outputs/financial_reasoning/distill_smoke_r1_v2 --teacher_backend openai --teacher_provider deepseek --teacher_model deepseek-reasoner --teacher_num_candidates 1 --teacher_temperature_schedule 0.6 --teacher_max_tokens 1024 --max_samples_per_family 2 --summary_csv`
+  - 命令：`python -m distill.run_financial_distill_pipeline --source_spec finqa=/root/autodl-tmp/data/financial_reasoning/raw/finqa/dev.json --work_dir /root/autodl-tmp/outputs/financial_reasoning/distill_smoke_r1_v2 --teacher_backend openai --teacher_provider deepseek --teacher_model deepseek-reasoner --teacher_num_candidates 1 --teacher_temperature_schedule 0.6 --teacher_max_tokens 1024 --max_samples_per_family 2 --summary_csv`
   - 结果：`input_rows=2`、`answer_check_pass_rows=2`、`reasoning_selection_pass_rows=2`、`sft_rows=2`、`dpo_rows=0`
   - 说明：`DeepSeek-R1` 在 `max_tokens=1024` 下可稳定产出可通过两阶段过滤的 `FinQA` 小样本蒸馏结果。
 - `run_fingpt_min.ipynb` 已新增 `Distill` section：
@@ -269,12 +269,12 @@ Fin-R1 评估用了五个代表性金融数据集： `FinQA` `ConvFinQA` `Ant-Fi
   - `<answer>` 只承载最终答案本身，并直接对标 `gold_answer`
 - `问题分析 / 关键证据 / 推理程序 / 最终答案` 不再作为当前蒸馏阶段的硬模板；后续若要加入，只作为增强项。
 - 已修改：
-  - `domain/financial/distill/prompts/financial_distill_teacher_user.txt`：不再要求四段结构，明确 `<answer>` 只输出答案本身。
-  - `domain/financial/distill/build_financial_distill_dataset.py`：从 distill prompt 中移除了旧的“请按以下结构作答”尾部，避免复用旧 SFT 模板。
-  - `domain/financial/distill/distill_with_teacher.py`：`gold_response -> <think>`，`gold_answer -> <answer>`；同时兼容未闭合 `<answer>` 标签。
-  - `domain/financial/distill/score_distill_candidates.py`：`answer_check` 和 `reasoning_selection` 都已切换到轻量 `<think>/<answer>` 口径，不再依赖四段结构锚点。
+  - `distill/prompts/financial_distill_teacher_user.txt`：不再要求四段结构，明确 `<answer>` 只输出答案本身。
+  - `distill/build_financial_distill_dataset.py`：从 distill prompt 中移除了旧的“请按以下结构作答”尾部，避免复用旧 SFT 模板。
+  - `distill/distill_with_teacher.py`：`gold_response -> <think>`，`gold_answer -> <answer>`；同时兼容未闭合 `<answer>` 标签。
+  - `distill/score_distill_candidates.py`：`answer_check` 和 `reasoning_selection` 都已切换到轻量 `<think>/<answer>` 口径，不再依赖四段结构锚点。
 - 最新 smoke test：
-  - 命令：`python -m domain.financial.distill.run_financial_distill_pipeline --source_spec finqa=/root/autodl-tmp/data/financial_reasoning/raw/finqa/dev.json --work_dir /root/autodl-tmp/outputs/financial_reasoning/distill_smoke_r1_v6 --teacher_backend openai --teacher_provider deepseek --teacher_model deepseek-reasoner --teacher_num_candidates 1 --teacher_temperature_schedule 0.6 --teacher_max_tokens 1024 --max_samples_per_family 2 --summary_csv`
+  - 命令：`python -m distill.run_financial_distill_pipeline --source_spec finqa=/root/autodl-tmp/data/financial_reasoning/raw/finqa/dev.json --work_dir /root/autodl-tmp/outputs/financial_reasoning/distill_smoke_r1_v6 --teacher_backend openai --teacher_provider deepseek --teacher_model deepseek-reasoner --teacher_num_candidates 1 --teacher_temperature_schedule 0.6 --teacher_max_tokens 1024 --max_samples_per_family 2 --summary_csv`
   - 结果：`input_rows=2`、`answer_check_pass_rows=2`、`reasoning_selection_pass_rows=2`、`sft_rows=2`、`dpo_rows=0`
   - 结论：当前基线已经实现“`<think>/<answer>` 范式 + `<answer>` accuracy”。
 
@@ -370,7 +370,7 @@ program-conditioned prompt 收缩 + smoke 配置调整
 
 **`clean_response`：**  
 
-`domain/financial/distill/score_distill_candidates.py` 目前把 `clean_response` 定义为“可直接用于训练的完整 `<think>...</think><answer>...</answer>` 响应”。实现上会先读取 `raw_response.choices[0].message.content`；只有当这段原始 content 本身完整满足标签格式时，才记为 `clean_response`。若 `teacher_backend` 是 `gold` 或 `copy_gold_final`，则允许回退检查 `response`，但同样要求它完整满足 `<think>/<answer>` 格式；除此之外，普通候选的 `response` 不会被直接记成 clean。
+`distill/score_distill_candidates.py` 目前把 `clean_response` 定义为“可直接用于训练的完整 `<think>...</think><answer>...</answer>` 响应”。实现上会先读取 `raw_response.choices[0].message.content`；只有当这段原始 content 本身完整满足标签格式时，才记为 `clean_response`。若 `teacher_backend` 是 `gold` 或 `copy_gold_final`，则允许回退检查 `response`，但同样要求它完整满足 `<think>/<answer>` 格式；除此之外，普通候选的 `response` 不会被直接记成 clean。
 
 若一组样本没有任何 `clean_response`，整组会被直接丢弃，不写入 `distill_sft.jsonl`、`distill_dpo.jsonl`、`distill_audit.jsonl` 或 `distill_summary.jsonl`。因此现在的 `distill_audit.jsonl` 和 `distill_summary.jsonl` 都只覆盖“成功入组”的样本组，而不是全量候选日志。summary 里会继续记录 `num_clean_response`、`chosen_clean_response_source`、`chosen_quality_score`、`rejected_quality_score` 等字段；终端打印的总览还会额外给出 `dropped_records` 与 `dropped_all_invalid_response_records`，用于解释组级丢弃情况。
 
@@ -389,14 +389,14 @@ reasoning selection 默认只在 `answer_check_pass=True` 时运行；若显式�
 
 **Checkpoint scoring 更新（2026-04-10）**  
 为了避免`distill_candidates.jsonl`总文件过大导致进程被kill，按照checkpoint切片对candidates进行打分。
-- 新增 `domain/financial/distill/score_distill_checkpoints.py`：
+- 新增 `distill/score_distill_checkpoints.py`：
   - 直接消费 `work_dir/checkpoints/candidates/part_*.jsonl`
   - 分片 scoring 结果写到 `work_dir/checkpoints/scored/`
   - 目录结构：`audit/`、`sft/`、`dpo/`、`summary/`、`summary_csv/`
   - 支持 `--resume` 跳过已完成分片
   - 完成后自动 merge 回 `work_dir/distill_audit.jsonl`、`distill_sft.jsonl`、`distill_dpo.jsonl`、`distill_summary.jsonl`
   - 输出 `checkpoints/scored/score_manifest.json`
-- `domain/financial/distill/score_distill_candidates.py` 已修复：
+- `distill/score_distill_candidates.py` 已修复：
   - 只有开启 `--enable_reasoning_judge` 时才读取 `judge_prompt_file`
   - 避免默认 scoring 因相对路径缺失直接报 `FileNotFoundError`
 

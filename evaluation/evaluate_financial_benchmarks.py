@@ -20,8 +20,8 @@ from datasets import load_dataset
 from peft import PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, GenerationConfig
-from domain.financial.processors.common import iter_records
-from domain.financial.processors.families import FAMILY_MODULES
+from financial_data_processors.common import iter_records
+from financial_data_processors.families import FAMILY_MODULES
 
 
 OPTION_RE = re.compile(r"\b([A-F])\b", re.IGNORECASE)

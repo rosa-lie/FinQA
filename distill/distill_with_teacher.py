@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
+ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -18,16 +18,34 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-DEFAULT_SYSTEM_PROMPT = (
-    "你是一名金融数值推理教师模型。"
-    "请严格使用 <think> 和 <answer> 标签输出，不要输出 JSON，不要添加额外说明。\n\n"
-    "<think>\n"
-    "在这里写逐步推理过程。\n"
-    "</think>\n"
-    "<answer>\n"
-    "在这里仅输出最终答案本身。\n"
-    "</answer>"
-)
+DEFAULT_SYSTEM_PROMPTS = {
+    "tagged_cot": (
+        "你是一名金融数值推理教师模型。"
+        "请严格使用 <think> 和 <answer> 标签输出，不要输出 JSON，不要添加额外说明。\n\n"
+        "<think>\n"
+        "在这里写逐步推理过程。\n"
+        "</think>\n"
+        "<answer>\n"
+        "在这里仅输出最终答案本身。\n"
+        "</answer>"
+    ),
+    "tagged_program": (
+        "你是一名金融数值推理教师模型。"
+        "你的输出目标不是散文化 CoT，而是紧凑、可核对、可学习的弱结构化推理。"
+        "请严格使用 <think> 和 <answer> 标签输出，不要输出 JSON，不要添加额外说明。\n\n"
+        "<think>\n"
+        "关键变量：\n"
+        "- 列出解题所需的核心数字、比率或对象。\n"
+        "推理程序：\n"
+        "- 用 2~5 步说明变量之间的计算关系，可使用 program 风格表达，如 divide(A, B) / subtract(A, B)。\n"
+        "结果校对：\n"
+        "- 用一句话说明为什么该程序得到最终答案。\n"
+        "</think>\n"
+        "<answer>\n"
+        "在这里仅输出最终答案本身。\n"
+        "</answer>"
+    ),
+}
 
 THREAD_LOCAL = threading.local()
 
@@ -89,7 +107,7 @@ def read_system_prompt(args: argparse.Namespace) -> str:
         return Path(args.system_prompt_file).read_text(encoding="utf-8").strip()
     if args.system_prompt:
         return args.system_prompt.strip()
-    return DEFAULT_SYSTEM_PROMPT
+    return DEFAULT_SYSTEM_PROMPTS[args.response_style]
 
 
 def make_generation_key(row: Dict[str, Any], candidate_index: int) -> str:
@@ -131,7 +149,7 @@ def build_messages(system_prompt: str, row: Dict[str, Any], template_text: str) 
 
 
 def create_client(args: argparse.Namespace):
-    from domain.roleplay.llm_client import create_llm_client
+    from role_play_data.llm_client import create_llm_client
 
     client, model_name = create_llm_client(
         provider=args.provider,
@@ -263,7 +281,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--system_prompt", type=str, default="")
     parser.add_argument("--system_prompt_file", type=str, default="")
-    parser.add_argument("--user_template_file", type=str, default="domain/financial/distill/prompts/program_conditioned_distill_user.txt")
+    parser.add_argument("--response_style", choices=["tagged_cot", "tagged_program"], default="tagged_program")
+    parser.add_argument("--user_template_file", type=str, default="distill/prompts/program_conditioned_distill_user.txt")
     parser.add_argument("--num_candidates", type=int, default=3)
     parser.add_argument("--temperature_schedule", type=str, default="0.6")
     parser.add_argument("--top_p", type=float, default=1.0)

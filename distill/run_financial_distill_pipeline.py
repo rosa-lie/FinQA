@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
+ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -87,13 +87,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--teacher_retry_sleep_seconds', type=float, default=2.0)
     parser.add_argument('--teacher_retry_backoff', type=float, default=2.0)
     parser.add_argument('--teacher_user_template_file', type=str, default='')
+    parser.add_argument('--teacher_response_style', choices=['tagged_cot', 'tagged_program'], default='tagged_program')
     parser.add_argument('--checkpoint_rows', type=int, default=512)
     parser.add_argument('--max_samples_per_family', type=int, default=0)
     parser.add_argument('--convfinqa_keep_final_only', type=str, default='true')
     parser.add_argument('--enable_reasoning_judge', action='store_true')
     parser.add_argument('--judge_provider', type=str, default='deepseek')
     parser.add_argument('--judge_model', type=str, default='deepseek-chat')
-    parser.add_argument('--judge_prompt_file', type=str, default='domain/financial/distill/prompts/financial_reasoning_judge.txt')
+    parser.add_argument('--judge_prompt_file', type=str, default='distill/prompts/financial_reasoning_judge.txt')
     parser.add_argument('--summary_csv', action='store_true')
     parser.add_argument('--generate_synthetic_rejected', action='store_true')
     parser.add_argument('--synthetic_rejected_modes', type=str, default='answer_perturb,think_empty,think_program')
@@ -125,7 +126,7 @@ def main() -> None:
 
     build_cmd = [
         sys.executable,
-        '-m', 'domain.financial.distill.build_financial_distill_dataset',
+        '-m', 'distill.build_financial_distill_dataset',
         '--output_file', str(input_file),
         '--max_samples_per_family', str(args.max_samples_per_family),
         '--convfinqa_keep_final_only', str(args.convfinqa_keep_final_only),
@@ -158,11 +159,12 @@ def main() -> None:
 
         teacher_cmd = [
             sys.executable,
-            '-m', 'domain.financial.distill.distill_with_teacher',
+            '-m', 'distill.distill_with_teacher',
             '--input_file', str(chunk_input_file),
             '--output_file', str(chunk_candidate_file),
             '--failed_output_file', str(chunk_failed_file),
             '--backend', args.teacher_backend,
+            '--response_style', args.teacher_response_style,
             '--num_candidates', str(args.teacher_num_candidates),
             '--temperature_schedule', args.teacher_temperature_schedule,
             '--max_tokens', str(args.teacher_max_tokens),
@@ -198,7 +200,7 @@ def main() -> None:
 
     score_cmd = [
         sys.executable,
-        '-m', 'domain.financial.distill.score_distill_candidates',
+        '-m', 'distill.score_distill_candidates',
         '--input_file', str(candidates_file),
         '--audit_output_file', str(audit_file),
         '--sft_output_file', str(sft_file),
@@ -223,7 +225,7 @@ def main() -> None:
         rejected_file = work_dir / 'distill_rejected_candidates.jsonl'
         rejected_cmd = [
             sys.executable,
-            '-m', 'domain.financial.distill.build_rejected_candidates',
+            '-m', 'distill.build_rejected_candidates',
             '--input_file', str(audit_file),
             '--output_file', str(rejected_file),
             '--modes', args.synthetic_rejected_modes,
@@ -238,7 +240,7 @@ def main() -> None:
 
         dpo_cmd = [
             sys.executable,
-            '-m', 'domain.financial.distill.score_distill_candidates',
+            '-m', 'distill.score_distill_candidates',
             '--input_file', str(merged_candidates),
             '--audit_output_file', str(audit_file),
             '--sft_output_file', str(sft_file),
@@ -280,6 +282,7 @@ def main() -> None:
         'teacher_retry_sleep_seconds': args.teacher_retry_sleep_seconds,
         'teacher_retry_backoff': args.teacher_retry_backoff,
         'teacher_user_template_file': args.teacher_user_template_file,
+        'teacher_response_style': args.teacher_response_style,
         'enable_reasoning_judge': args.enable_reasoning_judge,
         'judge_provider': args.judge_provider,
         'judge_model': args.judge_model,

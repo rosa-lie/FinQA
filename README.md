@@ -66,10 +66,10 @@
 
 ### 当前金融推理子项目实际使用到的模块
 
-- **数据处理**：`domain/financial/processors/*`、`data/clean_sharegpt_dataset.py`、`data/audit_sharegpt_dirty_samples.py`、`data/filter_sharegpt_by_audit.py`
+- **数据处理**：`financial_data_processors/*`、`data/clean_sharegpt_dataset.py`、`data/audit_sharegpt_dirty_samples.py`、`data/filter_sharegpt_by_audit.py`
 - **SFT 训练**：`training/supervised_finetuning.py`、`training/supervised_finetuning_accelerate.py`
 - **偏好优化 / 强化学习**：`training/dpo_training.py`、`training/financial_grpo_training.py`、`training/ppo_training.py`、`training/orpo_training.py`
-- **蒸馏**：`domain/financial/distill/*`
+- **蒸馏**：`distill/*`
 - **评测**：`evaluation/evaluate_financial_benchmarks.py`
 - **推理与服务**：`serving/inference.py`、`serving/gradio_demo.py`、`serving/fastapi_server_demo.py`
 
@@ -157,7 +157,7 @@ https://huggingface.co/datasets/AdaptLLM/finance-tasks
 对应 `run_fingpt_min.ipynb` 第 2~5 节，完整流程为：
 
 1. 原始数据就绪（本地缓存/HF）
-2. `domain/financial/financial_data_router.py` 统一转为 SFT/DPO 格式
+2. `financial_data_router.py` 统一转为 SFT/DPO 格式
 3. `data/clean_sharegpt_dataset.py` 基础清洗  
 4. `data/audit_sharegpt_dirty_samples.py` 质量审计
 5. `data/filter_sharegpt_by_audit.py --mode strict` 严格过滤并落盘训练目录

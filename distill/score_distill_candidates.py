@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
+ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -20,6 +20,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)(?:\s*</answer>|$)", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+VARIABLES_RE = re.compile(r"(?:关键变量|核心变量|variables)\s*[:：]\s*(.+?)(?=(?:推理程序|program|结果校对|校对|check|最终答案|答案|$))", re.IGNORECASE | re.DOTALL)
+CHECK_RE = re.compile(r"(?:结果校对|校对|check)\s*[:：]\s*(.+?)(?=(?:最终答案|答案|$))", re.IGNORECASE | re.DOTALL)
 THINK_TAG_RE = re.compile(r"<think>\s*(.*?)(?:\s*</think>|$)", re.IGNORECASE | re.DOTALL)
 FULL_TAGGED_RESPONSE_RE = re.compile(r"^\s*<think>\s*.*?\s*</think>\s*<answer>\s*.*?\s*</answer>\s*$", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?%?")
@@ -33,7 +35,7 @@ RUBRIC_FIELDS = [
     "reasoning_completeness",
     "content_diversity",
 ]
-DEFAULT_JUDGE_PROMPT = Path("domain/financial/distill/prompts/financial_reasoning_judge.txt")
+DEFAULT_JUDGE_PROMPT = Path("distill/prompts/financial_reasoning_judge.txt")
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -191,6 +193,8 @@ def build_answer_check(row: Dict[str, Any], abs_tol: float, rel_tol: float) -> D
     answer_text = extract_answer_body(clean_response)
     final_answer = extract_section(answer_text, FINAL_ANSWER_RE) or answer_text.strip().split("\n")[0].strip()
     program_section = extract_section(clean_response, PROGRAM_RE)
+    variables_section = extract_section(clean_response, VARIABLES_RE)
+    check_section = extract_section(clean_response, CHECK_RE)
     has_think = bool(THINK_TAG_RE.search(clean_response))
     has_answer = bool(ANSWER_TAG_RE.search(clean_response))
     format_ok = bool(clean_response and is_full_tagged_response(clean_response) and has_think and has_answer and final_answer)
@@ -207,6 +211,8 @@ def build_answer_check(row: Dict[str, Any], abs_tol: float, rel_tol: float) -> D
         "clean_response_source": clean_response_source,
         "final_answer": final_answer,
         "program_section": program_section,
+        "variables_section": variables_section,
+        "check_section": check_section,
         "has_think": has_think,
         "has_answer": has_answer,
         "format_ok": format_ok,
@@ -224,21 +230,27 @@ def heuristic_reasoning_scores(row: Dict[str, Any], answer_info: Dict[str, Any])
     think_match = THINK_TAG_RE.search(response)
     think_text = think_match.group(1).strip() if think_match else ""
     program_section = answer_info.get("program_section") or ""
+    variables_section = answer_info.get("variables_section") or ""
+    check_section = answer_info.get("check_section") or ""
     final_answer = answer_info.get("final_answer") or ""
     repeated_lines = len(set(response.splitlines())) < max(1, len(response.splitlines()) - 1)
     think_len = len(think_text)
     program_len = len(program_section)
+    variables_len = len(variables_section)
+    check_len = len(check_section)
+    step_count = len(re.findall(r"(?:^|\n)\s*(?:[-*]|\d+[.)])\s+", think_text))
+    has_structure = bool(variables_section or program_section or check_section)
 
     scores = {
         "internal_consistency": 2 if answer_info.get("answer_correct") else 1 if answer_info.get("format_ok") else 0,
-        "instruction_alignment": 2 if answer_info.get("format_ok") and final_answer else 1 if answer_info.get("format_ok") else 0,
-        "task_relevance": 2 if think_len >= 80 else 1 if think_len >= 20 else 0,
-        "logical_coherence": 2 if answer_info.get("program_consistent") is True else 1 if think_len >= 80 or program_len > 0 else 0,
-        "evidence_quality": 2 if answer_info.get("evidence_json_like_hits", 0) == 0 and think_len >= 20 else 1 if answer_info.get("evidence_json_like_hits", 0) == 0 else 0,
-        "reasoning_completeness": 2 if think_len >= 80 and final_answer else 1 if final_answer else 0,
-        "content_diversity": 2 if not repeated_lines and think_len >= 80 else 1 if think_len >= 20 else 0,
+        "instruction_alignment": 2 if answer_info.get("format_ok") and final_answer and has_structure else 1 if answer_info.get("format_ok") else 0,
+        "task_relevance": 2 if program_len >= 24 or variables_len >= 16 or step_count >= 3 else 1 if think_len >= 20 or has_structure else 0,
+        "logical_coherence": 2 if answer_info.get("program_consistent") is True else 1 if program_len > 0 or check_len > 0 or think_len >= 60 else 0,
+        "evidence_quality": 2 if answer_info.get("evidence_json_like_hits", 0) == 0 and (variables_len >= 12 or think_len >= 20) else 1 if answer_info.get("evidence_json_like_hits", 0) == 0 else 0,
+        "reasoning_completeness": 2 if final_answer and has_structure and program_len > 0 and (variables_len > 0 or check_len > 0) else 1 if final_answer and has_structure else 0,
+        "content_diversity": 2 if not repeated_lines and (program_len >= 24 or step_count >= 3) else 1 if has_structure or think_len >= 20 else 0,
     }
-    summary = "规则评分（轻量 <think>/<answer> 口径）"
+    summary = "规则评分（弱结构化 reasoning / program-style 口径）"
     return {
         **scores,
         "summary": summary,
@@ -276,7 +288,7 @@ def build_judge_user_prompt(row: Dict[str, Any]) -> str:
 
 
 def create_judge_client(args: argparse.Namespace):
-    from domain.roleplay.llm_client import create_llm_client
+    from role_play_data.llm_client import create_llm_client
     client, model_name = create_llm_client(
         provider=args.judge_provider,
         api_key=args.judge_api_key,
