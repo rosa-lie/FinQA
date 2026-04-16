@@ -2,177 +2,130 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, Optional
 
 from ..common import (
-    build_context_sections,
-    extract_numeric_text,
+    build_english_context_sections,
+    build_reasoning_supervision,
+    build_rejected_from_strict_response,
+    finalize_prompt_audits,
+    quality_tier_allowed,
+    render_strict_target,
     safe_jsonable,
-    summarize_evidence_blocks,
     to_text,
 )
 
-NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and to_text(value):
+            return value
+    return None
 
 
-def build_sft_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
+def maybe_rewrite_finqa_question(question: str, norm: Dict[str, Any]) -> str:
+    evidence_text = " ".join(to_text(item.get("rendered_text")) for item in norm.get("aligned_evidence") or []).lower()
+    q = to_text(question).lower()
+    if "basis points" in evidence_text and "interest expense" in evidence_text and "libor" in evidence_text:
+        if "change" not in q and "basis" not in q:
+            return "What would be the annual interest expense change if LIBOR changes by 100 basis points?"
+    return ""
+
+
+def build_prompt(rec: Dict[str, Any], question: str, args: Any) -> str:
+    prompt_parts = [
+        "You are a financial table-and-text reasoning assistant.",
+        "Use the report context to identify the supporting evidence, produce the executable program, and give the final answer.",
+    ]
+    prompt_parts.extend(build_english_context_sections(rec, args))
+    prompt_parts.append(f"Question: {question}")
+    prompt_parts.append(
+        "Respond exactly in this format:\n"
+        "Evidence:\n"
+        "- ...\n\n"
+        "Program: ...\n"
+        "Answer: ..."
+    )
+    return "\n\n".join(prompt_parts)
+
+
+def normalize_record(rec: Dict[str, Any], args: Any) -> Dict[str, Any]:
     qa = rec.get("qa") if isinstance(rec.get("qa"), dict) else rec
     question = to_text(qa.get("question") or rec.get("question"))
-    if not question:
-        return None
+    program_re = _first_present(qa.get("program_re"), rec.get("program_re"))
+    raw_answer = _first_present(qa.get("answer"), rec.get("answer"))
+    exe_ans = qa.get("exe_ans") if qa.get("exe_ans") is not None else rec.get("exe_ans")
+    gold_inds = qa.get("gold_inds") or rec.get("gold_inds") or {}
 
-    program = to_text(qa.get("program_re") or qa.get("program") or rec.get("program_re") or rec.get("program"))
-    final_answer = to_text(qa.get("exe_ans") or rec.get("exe_ans") or qa.get("answer") or rec.get("answer"))
-    if not final_answer:
-        return None
-
-    gold_inds = qa.get("gold_inds") or rec.get("gold_inds") or []
-    supporting = summarize_evidence_blocks(gold_inds, args.max_supporting_facts, args.max_context_chars)
-
-    prompt_parts = [
-        "你是一名金融表文混合推理助手。请结合文本、表格和问题，给出可执行的推理程序与最终答案。",
-    ]
-    prompt_parts.extend(build_context_sections(rec, args))
-    prompt_parts.append(f"问题：{question}")
-    prompt_parts.append("请按以下结构作答：\n问题分析：...\n关键证据：\n- ...\n推理程序：...\n最终答案：...")
-
-    answer_lines = [
-        "问题分析：先定位题目涉及的财务指标，再根据给定程序完成数值计算。",
-        "关键证据：",
-    ]
-    if supporting:
-        answer_lines.extend([f"- {fact}" for fact in supporting])
-    else:
-        answer_lines.append("- 需要从题目相关的表格行、文本说明和财务指标中提取关键数值。")
-    answer_lines.append(f"推理程序：{program or '请根据题意构造数值推理程序。'}")
-    answer_lines.append(f"最终答案：{extract_numeric_text(final_answer)}")
-
-    return {
-        "source_dataset": "FinQA",
-        "task_type": "financial_table_text_reasoning",
-        "record_id": to_text(rec.get("id")),
-        "metadata": {
-            "program": program,
+    norm = build_reasoning_supervision(
+        rec,
+        family="finqa",
+        source_dataset="FinQA",
+        task_type="financial_table_text_reasoning",
+        record_id=to_text(rec.get("id")),
+        question=question,
+        program_re=program_re,
+        raw_answer=raw_answer,
+        exe_ans=exe_ans,
+        gold_evidence=gold_inds,
+        args=args,
+        extra_metadata={
+            "program": to_text(qa.get("program") or rec.get("program")),
+            "program_re": to_text(program_re),
             "gold_inds": safe_jsonable(gold_inds),
+            "answer": safe_jsonable(raw_answer),
+            "exe_ans": safe_jsonable(exe_ans),
+        },
+    )
+    question_rewritten = maybe_rewrite_finqa_question(question, norm)
+    norm["question_raw"] = question
+    norm["question_rewritten"] = question_rewritten
+    prompt_question = question_rewritten or question
+    norm["prompt"] = build_prompt(rec, prompt_question, args) if prompt_question else ""
+    if norm["prompt"]:
+        finalize_prompt_audits(norm, norm["prompt"])
+    return norm
+
+
+def render_sft_item(norm: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
+    if not norm.get("strict_ok") or not quality_tier_allowed(norm, args):
+        return None
+    prompt = to_text(norm.get("prompt"))
+    if not prompt:
+        return None
+    return {
+        "source_dataset": norm.get("source_dataset", "FinQA"),
+        "task_type": norm.get("task_type", "financial_table_text_reasoning"),
+        "record_id": norm.get("record_id", ""),
+        "metadata": {
+            "program_raw": norm.get("program_raw", ""),
+            "program_canonical": norm.get("program_canonical", ""),
+            "program_executable": norm.get("program_executable"),
+            "answer_raw": norm.get("answer_raw", ""),
+            "answer_exe": norm.get("answer_exe"),
+            "answer_norm": norm.get("answer_norm", ""),
+            "answer_display": norm.get("answer_display", ""),
+            "answer_matches_program": norm.get("answer_matches_program", False),
+            "aligned_evidence": norm.get("aligned_evidence", []),
+            "evidence_match_type": norm.get("evidence_match_type", ""),
+            "audit_flags": norm.get("audit_flags", []),
+            "semantic_audit_flags": norm.get("semantic_audit_flags", []),
+            "quality_tier": norm.get("quality_tier", ""),
+            "evidence_visible_in_prompt": norm.get("evidence_visible_in_prompt"),
+            "table_evidence_column_pruned": norm.get("table_evidence_column_pruned", False),
+            "question_raw": norm.get("question_raw", ""),
+            "question_rewritten": norm.get("question_rewritten", ""),
+            "raw_metadata": norm.get("metadata", {}),
         },
         "conversations": [
-            {"from": "human", "value": "\n\n".join(prompt_parts)},
-            {"from": "gpt", "value": "\n".join(answer_lines)},
+            {"from": "human", "value": prompt},
+            {"from": "gpt", "value": render_strict_target(norm, getattr(args, "sft_variant", "benchmark_sft"))},
         ],
     }
 
 
-def _mutate_numeric_answer(text: str) -> str:
-    final_answer_match = re.search(r"(最终答案：\s*)(.+)", text)
-    if final_answer_match:
-        answer_text = final_answer_match.group(2)
-        match = NUM_RE.search(answer_text)
-        if match:
-            token = match.group(0).replace(",", "")
-            try:
-                value = float(token)
-                step = max(abs(value) * 0.12, 1.0)
-                mutated = value + step if value >= 0 else value - step
-                replacement = str(int(mutated)) if float(mutated).is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
-            except Exception:
-                replacement = token + "1"
-            new_answer = answer_text[:match.start()] + replacement + answer_text[match.end():]
-            return text[:final_answer_match.start(2)] + new_answer + text[final_answer_match.end(2):]
-        return text[:final_answer_match.end(1)] + "信息不足，暂不作答。"
-
-    match = NUM_RE.search(text)
-    if not match:
-        return text + "\n最终答案：信息不足，暂不作答。"
-
-    token = match.group(0).replace(",", "")
-    try:
-        value = float(token)
-        step = max(abs(value) * 0.12, 1.0)
-        mutated = value + step if value >= 0 else value - step
-        replacement = str(int(mutated)) if float(mutated).is_integer() else f"{mutated:.4f}".rstrip("0").rstrip(".")
-    except Exception:
-        replacement = token + "1"
-    return text[:match.start()] + replacement + text[match.end():]
-
-
-def _mutate_program_expr(program: str) -> str:
-    p = program
-    substitutions = [
-        ("divide", "multiply"),
-        ("subtract", "add"),
-        ("减去", "加上"),
-        ("同比", "环比"),
-    ]
-    for src, dst in substitutions:
-        if src in p:
-            p = p.replace(src, dst, 1)
-            break
-
-    fn_call = re.search(r"([A-Za-z_]+)\(([^,()]+),\s*([^)]+)\)", p)
-    if fn_call and fn_call.group(1).lower() in {"subtract", "divide", "add", "multiply"}:
-        fn, a, b = fn_call.group(1), fn_call.group(2).strip(), fn_call.group(3).strip()
-        p = p[:fn_call.start()] + f"{fn}({b}, {a})" + p[fn_call.end():]
-
-    if p == program:
-        p = program + "；并将关键取值替换为相邻年份口径。"
-    return p
-
-
-def _mutate_program_section(text: str) -> str:
-    lines = text.splitlines()
-    out = []
-    changed = False
-    for line in lines:
-        if line.startswith("推理程序："):
-            prog = line[len("推理程序："):].strip()
-            out.append("推理程序：" + _mutate_program_expr(prog))
-            changed = True
-        else:
-            out.append(line)
-    if not changed:
-        out.append("推理程序：采用相邻年份近似估算，并把除法替换为乘法。")
-    return "\n".join(out)
-
-
-def _mutate_evidence_section(text: str) -> str:
-    lines = text.splitlines()
-    try:
-        start = lines.index("关键证据：")
-    except ValueError:
-        return text
-
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        if lines[i].startswith("推理程序：") or lines[i].startswith("最终答案："):
-            end = i
-            break
-
-    mutated_evidence = ["- 误将相邻年度和相邻财务科目作为核心证据。"]
-    return "\n".join(lines[: start + 1] + mutated_evidence + lines[end:])
-
-
-def _mutate_analysis_section(text: str) -> str:
-    lines = []
-    changed = False
-    for line in text.splitlines():
-        if line.startswith("问题分析："):
-            lines.append("问题分析：为快速得到结果，按近似口径估算并默认关键条件不变。")
-            changed = True
-        else:
-            lines.append(line)
-    if not changed:
-        lines.insert(0, "问题分析：按近似口径估算，默认关键条件不变。")
-    return "\n".join(lines)
-
-
-def _build_high_confusion_rejected(chosen: str) -> str:
-    rejected = chosen
-    rejected = _mutate_analysis_section(rejected)
-    rejected = _mutate_evidence_section(rejected)
-    rejected = _mutate_program_section(rejected)
-    rejected = _mutate_numeric_answer(rejected)
-    return rejected
+def build_sft_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
+    return render_sft_item(normalize_record(rec, args), args)
 
 
 def build_dpo_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
@@ -181,15 +134,14 @@ def build_dpo_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:
         return None
 
     chosen = item["conversations"][1]["value"]
-    rejected = _build_high_confusion_rejected(chosen)
-
+    rejected = build_rejected_from_strict_response(chosen)
     return {
         "system": "",
         "history": [],
         "question": item["conversations"][0]["value"],
         "response_chosen": chosen,
         "response_rejected": rejected,
-        "source_dataset": item.get("source_dataset", "finqa"),
+        "source_dataset": item.get("source_dataset", "FinQA"),
         "record_id": item.get("record_id", ""),
         "metadata": item.get("metadata", {}),
     }

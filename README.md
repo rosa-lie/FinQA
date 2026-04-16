@@ -150,19 +150,21 @@ https://finqasite.github.io/ https://github.com/czyssrs/FinQA
 https://huggingface.co/datasets/AdaptLLM/finance-tasks
 - This repo contains the **evaluation datasets** for our paper [Adapting Large Language Models via Reading Comprehension](https://huggingface.co/papers/2309.09530).
 
-## Done：数据处理
+# 数据处理
+
+## version 1
 
 数据处理文档见：[docs/fin_datasets.md](docs/fin_datasets.md)
 
 对应 `run_fingpt_min.ipynb` 第 2~5 节，完整流程为：
 
 1. 原始数据就绪（本地缓存/HF）
-2. `financial_data_router.py` 统一转为 SFT/DPO 格式
+2. `python -m financial_data_processors` 统一转为 SFT/DPO 格式
 3. `data/clean_sharegpt_dataset.py` 基础清洗  
 4. `data/audit_sharegpt_dirty_samples.py` 质量审计
 5. `data/filter_sharegpt_by_audit.py --mode strict` 严格过滤并落盘训练目录
 
-### 数据处理结果（Notebook 现有运行记录）
+### 数据处理结果
 
 SFT1（FinQA）：
 - raw: `6251`
@@ -179,7 +181,7 @@ SFT2（ConvFinQA turn）：
 - 总字符：`<=6000`
 - 单轮字符：`<=2500`
 
-# Doing：distillation
+## version2: distillation
 
 [distill文档](docs/fin_distill.md)
 
