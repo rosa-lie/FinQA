@@ -342,20 +342,30 @@ def _iter_local_records(file_path: str):
         yield payload
 
 
+def _schema_safe_metadata_value(value):
+    """Return metadata values with stable Arrow-compatible types."""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
 def _normalize_local_record(record: dict) -> dict:
     """
     Keep training-relevant fields while making auxiliary metadata schema-safe.
-    Some mixed datasets store `metadata.gold_ind` and `metadata.gold_inds` with
-    incompatible nested shapes, which breaks `load_dataset('json', ...)`.
+    Financial SFT rows may mix numeric, string, null, and nested raw metadata
+    values in the same JSON path, which breaks Dataset.from_list.
     """
     normalized = dict(record)
     metadata = normalized.get("metadata")
     if isinstance(metadata, dict):
-        metadata = dict(metadata)
-        for key in ("gold_ind", "gold_inds"):
-            if key in metadata and not isinstance(metadata[key], str):
-                metadata[key] = json.dumps(metadata[key], ensure_ascii=False, sort_keys=True)
-        normalized["metadata"] = metadata
+        normalized["metadata"] = {
+            str(key): _schema_safe_metadata_value(value)
+            for key, value in metadata.items()
+        }
     return normalized
 
 

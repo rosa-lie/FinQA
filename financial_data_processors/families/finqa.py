@@ -33,6 +33,25 @@ def maybe_rewrite_finqa_question(question: str, norm: Dict[str, Any]) -> str:
 
 
 def build_prompt(rec: Dict[str, Any], question: str, args: Any) -> str:
+    if getattr(args, "sft_variant", "benchmark_sft") == "dual_answer_sft":
+        prompt_parts = [
+            "You are a financial table-and-text reasoning assistant.",
+            f"Current question:\n{question}",
+            "Output format:\n"
+            "Evidence:\n"
+            "- ...\n\n"
+            "Program: ...\n"
+            "Answer: ...\n"
+            "Normalized Answer: ...",
+            "Normalization rule:\n"
+            "- For percentage questions, Normalized Answer must be a decimal ratio.\n"
+            "- Answer may use natural units such as %, $, million, billion.",
+        ]
+        context_sections = build_english_context_sections(rec, args)
+        if context_sections:
+            prompt_parts.append("Report context:\n" + "\n\n".join(context_sections))
+        return "\n\n".join(prompt_parts)
+
     prompt_parts = [
         "You are a financial table-and-text reasoning assistant.",
         "Use the report context to identify the supporting evidence, produce the executable program, and give the final answer.",
@@ -105,6 +124,9 @@ def render_sft_item(norm: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]
             "answer_exe": norm.get("answer_exe"),
             "answer_norm": norm.get("answer_norm", ""),
             "answer_display": norm.get("answer_display", ""),
+            "answer_unit": norm.get("answer_unit", ""),
+            "answer_scale": norm.get("answer_scale", ""),
+            "answer_source": norm.get("answer_source", ""),
             "answer_matches_program": norm.get("answer_matches_program", False),
             "aligned_evidence": norm.get("aligned_evidence", []),
             "evidence_match_type": norm.get("evidence_match_type", ""),

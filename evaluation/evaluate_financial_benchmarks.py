@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 from datasets import load_dataset
@@ -31,10 +31,12 @@ STRICT_OPTION_PATTERNS = [
 ]
 ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+ANSWER_LINE_RE = re.compile(r"(?m)^Answer\s*[:：]\s*(.+)$", re.IGNORECASE)
+NORMALIZED_ANSWER_RE = re.compile(r"(?m)^Normalized Answer\s*[:：]\s*(.+)$", re.IGNORECASE)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
-NUMERIC_STRUCTURED_ANCHORS = ["问题分析：", "关键证据：", "推理程序：", "最终答案："]
+NUMERIC_STRUCTURED_ANCHORS = ["Evidence:", "Program:", "Answer:", "Normalized Answer:"]
 MCQ_STRUCTURED_ANCHORS = ["题目理解：", "推理：", "最终答案："]
 
 
@@ -68,6 +70,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument(
+        "--pass_k",
+        type=str,
+        default="1,4,8",
+        help="Comma-separated sampled pass@k values to report, e.g. 1,4,8.",
+    )
+    parser.add_argument(
+        "--num_samples_per_example",
+        type=int,
+        default=8,
+        help="Number of sampled candidates per example for pass@k.",
+    )
+    parser.add_argument("--sample_temperature", type=float, default=0.7)
+    parser.add_argument("--sample_top_p", type=float, default=0.95)
+    parser.add_argument("--sample_seed", type=int, default=42)
     parser.add_argument("--load_in_8bit", action="store_true")
     parser.add_argument("--load_in_4bit", action="store_true")
     parser.add_argument("--convfinqa_test_file", type=str, default="")
@@ -94,6 +111,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--numeric_rel_tol", type=float, default=1e-4)
     parser.add_argument("--output_dir", type=str, required=True)
     return parser.parse_args()
+
+
+def parse_pass_k_values(value: str) -> List[int]:
+    values: List[int] = []
+    for item in (value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            k = int(item)
+        except ValueError as exc:
+            raise ValueError(f"Invalid pass@k value: {item}") from exc
+        if k <= 0:
+            raise ValueError(f"pass@k values must be positive integers: {item}")
+        if k not in values:
+            values.append(k)
+    if not values:
+        raise ValueError("Please provide at least one pass@k value.")
+    return sorted(values)
 
 
 def parse_name_path_entries(entries: Sequence[str]) -> Dict[str, str]:
@@ -179,6 +215,9 @@ PROCESSOR_ARGS = SimpleNamespace(
     max_table_rows=20,
     max_table_cols=12,
     max_cell_chars=80,
+    sft_variant="dual_answer_sft",
+    convfinqa_mode="turn_level",
+    convfinqa_keep_final_only="false",
 )
 
 
@@ -221,10 +260,30 @@ def extract_answer_body(text: str) -> str:
 
 def extract_final_answer(text: str) -> str:
     text = extract_answer_body(text or "")
+    normalized = extract_normalized_answer(text)
+    if normalized:
+        return normalized
+    answer = extract_display_answer(text)
+    if answer:
+        return answer
     match = FINAL_ANSWER_RE.search(text or "")
     if match:
         return match.group(1).strip().split("\n")[0].strip()
     return (text or "").strip()
+
+
+def extract_display_answer(text: str) -> str:
+    match = ANSWER_LINE_RE.search(extract_answer_body(text or ""))
+    if not match:
+        return ""
+    return match.group(1).strip().split("\n")[0].strip()
+
+
+def extract_normalized_answer(text: str) -> str:
+    match = NORMALIZED_ANSWER_RE.search(extract_answer_body(text or ""))
+    if not match:
+        return ""
+    return match.group(1).strip().split("\n")[0].strip()
 
 
 def build_numeric_example_from_processor(record: Dict[str, Any], family: str, task_name: str) -> Optional[BenchmarkExample]:
@@ -240,7 +299,7 @@ def build_numeric_example_from_processor(record: Dict[str, Any], family: str, ta
     gold_answer = extract_final_answer(chosen)
     metadata = dict(item.get("metadata") or {})
     metadata.setdefault("source_dataset", item.get("source_dataset", family))
-    gold_program = to_text(metadata.get("program"))
+    gold_program = to_text(metadata.get("program_canonical") or metadata.get("program"))
     if not prompt or not gold_answer:
         return None
     return BenchmarkExample(
@@ -259,10 +318,11 @@ def load_numeric_examples(test_file: str, family: str, task_name: str, max_sampl
         return []
     records = [dict(row) for row in iter_records(load_json_records(Path(test_file)))]
     if family == "convfinqa_turn":
-        records, dedupe_stats = FAMILY_MODULES[family].dedupe_final_turn(records)
-        dropped = dedupe_stats.get("dedup_dropped_rows", 0)
-        if dropped:
-            print(f"[prep] {family}: dedup dropped {dropped} rows before evaluation")
+        records, multiturn_stats = FAMILY_MODULES[family].prepare_multiturn_records(records, PROCESSOR_ARGS)
+        print(
+            f"[prep] {family}: prepared {multiturn_stats.get('conversation_count', 0)} conversations "
+            f"with {multiturn_stats.get('history_full_reasoning_turns', 0)} full-history turns"
+        )
     examples: List[BenchmarkExample] = []
     build_skipped = 0
     for record in records:
@@ -434,7 +494,17 @@ def load_model_and_tokenizer(
 
 
 @torch.inference_mode()
-def generate_response(model, tokenizer, prompt: str, args: argparse.Namespace) -> str:
+def generate_response(
+    model,
+    tokenizer,
+    prompt: str,
+    args: argparse.Namespace,
+    *,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    do_sample: Optional[bool] = None,
+    seed: Optional[int] = None,
+) -> str:
     messages = []
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
@@ -443,15 +513,27 @@ def generate_response(model, tokenizer, prompt: str, args: argparse.Namespace) -
     inputs = tokenizer(prompt_text, return_tensors="pt")
     input_ids = inputs["input_ids"].to(model.device)
     attention_mask = inputs["attention_mask"].to(model.device)
-    outputs = model.generate(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
+    generation_temperature = args.temperature if temperature is None else temperature
+    generation_do_sample = generation_temperature > 0.0 if do_sample is None else do_sample
+    if seed is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    generation_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        do_sample=args.temperature > 0.0,
+        do_sample=generation_do_sample,
         repetition_penalty=args.repetition_penalty,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
+    )
+    if generation_do_sample:
+        generation_config.temperature = generation_temperature
+        if top_p is not None:
+            generation_config.top_p = top_p
+    outputs = model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        generation_config=generation_config,
     )
     generated_tokens = outputs[0][input_ids.shape[1]:]
     return tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
@@ -471,7 +553,7 @@ def normalize_program(text: str) -> str:
 def parse_number(text: str) -> Optional[float]:
     if not text:
         return None
-    final_section = extract_section(extract_answer_body(text), FINAL_ANSWER_RE) or extract_answer_body(text) or text
+    final_section = extract_normalized_answer(text) or extract_display_answer(text) or extract_section(extract_answer_body(text), FINAL_ANSWER_RE) or extract_answer_body(text) or text
     matches = NUMBER_RE.findall(final_section.replace("，", ","))
     if not matches:
         return None
@@ -489,12 +571,13 @@ def parse_number(text: str) -> Optional[float]:
 
 
 def normalize_answer_text(text: str) -> str:
-    text = extract_section(extract_answer_body(text), FINAL_ANSWER_RE) or extract_answer_body(text) or text
+    text = extract_normalized_answer(text) or extract_display_answer(text) or extract_section(extract_answer_body(text), FINAL_ANSWER_RE) or extract_answer_body(text) or text
     return re.sub(r"\s+", "", text).strip().lower()
 
 
 def score_example(example: BenchmarkExample, prediction: str, args: argparse.Namespace) -> Dict[str, Any]:
-    final_answer = extract_section(extract_answer_body(prediction), FINAL_ANSWER_RE) or extract_answer_body(prediction).strip().split("\n")[0].strip()
+    normalized_answer = extract_normalized_answer(prediction)
+    answer = extract_display_answer(prediction) or extract_section(extract_answer_body(prediction), FINAL_ANSWER_RE) or extract_answer_body(prediction).strip().split("\n")[0].strip()
     program_section = extract_section(prediction, PROGRAM_RE)
     if example.answer_type == "numeric":
         structured_anchors = NUMERIC_STRUCTURED_ANCHORS
@@ -510,7 +593,9 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         "prediction": prediction,
         "answer_correct": 0.0,
         "program_correct": None,
-        "final_answer_coverage": float(bool(final_answer)),
+        "answer_coverage": float(bool(answer)),
+        "normalized_answer_coverage": float(bool(normalized_answer)),
+        "final_answer_coverage": float(bool(answer)),
         "program_section_coverage": float(bool(program_section)),
         "structured_response_coverage": float(all(anchor in (prediction or "") for anchor in structured_anchors)),
         "prediction_chars": len((prediction or "").strip()),
@@ -558,28 +643,71 @@ def _mean(values: List[float]) -> Any:
     return round(sum(values) / len(values), 6)
 
 
+def compute_pass_metrics(
+    greedy_score: Dict[str, Any],
+    sampled_scores: Sequence[Dict[str, Any]],
+    pass_k_values: Sequence[int],
+) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {
+        "pass@1_greedy": float(greedy_score["answer_correct"]),
+        "pass@1_sampled": "",
+    }
+    sampled_correct = [float(item["answer_correct"]) for item in sampled_scores]
+    if sampled_correct:
+        metrics["pass@1_sampled"] = float(sampled_correct[0] > 0.0)
+    for k in pass_k_values:
+        if k == 1:
+            continue
+        effective_k = min(k, len(sampled_correct))
+        metrics[f"pass@{k}"] = float(any(score > 0.0 for score in sampled_correct[:effective_k])) if effective_k else ""
+    return metrics
+
+
+def build_example_summary_score(
+    greedy_score: Dict[str, Any],
+    sampled_scores: Sequence[Dict[str, Any]],
+    pass_k_values: Sequence[int],
+) -> Dict[str, Any]:
+    summary_score = dict(greedy_score)
+    summary_score.update(compute_pass_metrics(greedy_score, sampled_scores, pass_k_values))
+    return summary_score
+
+
 def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, Any]]) -> Dict[str, Any]:
     answer_scores = [item["answer_correct"] for item in scores]
     program_scores = [item["program_correct"] for item in scores if item["program_correct"] is not None]
-    final_answer_scores = [item["final_answer_coverage"] for item in scores]
+    answer_coverage_scores = [item.get("answer_coverage", item.get("final_answer_coverage", 0.0)) for item in scores]
+    normalized_answer_scores = [item.get("normalized_answer_coverage", 0.0) for item in scores]
+    final_answer_scores = [item.get("final_answer_coverage", item.get("answer_coverage", 0.0)) for item in scores]
     program_section_scores = [item["program_section_coverage"] for item in scores]
     structured_scores = [item["structured_response_coverage"] for item in scores]
     prediction_chars = [item["prediction_chars"] for item in scores]
     numeric_parse_scores = [item["numeric_parse_rate"] for item in scores if item["numeric_parse_rate"] is not None]
     answer_acc = sum(answer_scores) / len(answer_scores)
-    return {
+    row = {
         "model_name": model_name,
         "task_name": task_name,
         "num_examples": len(scores),
         "answer_accuracy": round(answer_acc, 6),
         "primary_metric": round(answer_acc, 6),
+        "pass@1_greedy": _mean([item["pass@1_greedy"] for item in scores if item.get("pass@1_greedy") != ""]),
+        "pass@1_sampled": _mean([item["pass@1_sampled"] for item in scores if item.get("pass@1_sampled") != ""]),
         "program_accuracy": _mean(program_scores),
+        "answer_coverage": _mean(answer_coverage_scores),
+        "normalized_answer_coverage": _mean(normalized_answer_scores),
         "final_answer_coverage": _mean(final_answer_scores),
         "program_section_coverage": _mean(program_section_scores),
         "structured_response_coverage": _mean(structured_scores),
         "numeric_parse_rate": _mean(numeric_parse_scores),
         "avg_prediction_chars": _mean(prediction_chars),
     }
+    pass_keys = sorted(
+        {key for score in scores for key in score if key.startswith("pass@") and key not in {"pass@1_greedy", "pass@1_sampled"}},
+        key=lambda item: int(item.split("@", 1)[1]),
+    )
+    for key in pass_keys:
+        row[key] = _mean([item[key] for item in scores if item.get(key) != ""])
+    return row
 
 
 def aggregate_scores(model_name: str, scores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -613,11 +741,64 @@ def save_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
 def save_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
     if not rows:
         return
-    fieldnames = list(rows[0].keys())
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row.keys()))
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def build_prediction_row(
+    model_name: str,
+    example: BenchmarkExample,
+    prediction: str,
+    score: Dict[str, Any],
+    generation_mode: str,
+    candidate_index: int,
+) -> Dict[str, Any]:
+    return {
+        "model_name": model_name,
+        "task_name": example.task_name,
+        "record_id": example.record_id,
+        "generation_mode": generation_mode,
+        "candidate_index": candidate_index,
+        "prompt": example.prompt,
+        "gold_answer": example.gold_answer,
+        "gold_program": example.gold_program,
+        "prediction": prediction,
+        "answer_correct": score["answer_correct"],
+        "program_correct": score["program_correct"],
+        "metadata": example.metadata,
+    }
+
+
+def score_generation(
+    model,
+    tokenizer,
+    model_name: str,
+    example: BenchmarkExample,
+    args: argparse.Namespace,
+    *,
+    generation_mode: str,
+    candidate_index: int,
+    temperature: float,
+    top_p: Optional[float],
+    do_sample: bool,
+    seed: Optional[int],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    prediction = generate_response(
+        model,
+        tokenizer,
+        example.prompt,
+        args,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=do_sample,
+        seed=seed,
+    )
+    score = score_example(example, prediction, args)
+    row = build_prediction_row(model_name, example, prediction, score, generation_mode, candidate_index)
+    return score, row
 
 
 def unload_model(model, tokenizer) -> None:
@@ -632,6 +813,18 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    pass_k_values = parse_pass_k_values(args.pass_k)
+    if args.num_samples_per_example < 0:
+        raise ValueError("--num_samples_per_example must be non-negative.")
+    if args.num_samples_per_example > 0 and args.sample_temperature <= 0.0:
+        raise ValueError("--sample_temperature must be positive when sampling candidates.")
+    if not 0.0 < args.sample_top_p <= 1.0:
+        raise ValueError("--sample_top_p must be in the interval (0, 1].")
+    if args.num_samples_per_example < max(pass_k_values):
+        print(
+            f"[warn] num_samples_per_example={args.num_samples_per_example} is smaller than max pass@k={max(pass_k_values)}; "
+            "metrics will use available candidates only."
+        )
 
     model_paths = parse_name_path_entries(args.model_entry)
     if not model_paths:
@@ -672,6 +865,11 @@ def main() -> None:
         "fineval_local_file": args.fineval_local_file,
         "cflue_task_files": cflue_task_files,
         "num_examples": len(benchmark_examples),
+        "pass_k": pass_k_values,
+        "num_samples_per_example": args.num_samples_per_example,
+        "sample_temperature": args.sample_temperature,
+        "sample_top_p": args.sample_top_p,
+        "sample_seed": args.sample_seed,
     }
     (output_dir / "benchmark_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -682,24 +880,42 @@ def main() -> None:
         model, tokenizer = load_model_and_tokenizer(model_path, tokenizer_path, adapter_path, args)
         raw_predictions: List[Dict[str, Any]] = []
         scores: List[Dict[str, Any]] = []
-        for example in tqdm(benchmark_examples, desc=f"Evaluating {model_name}"):
-            prediction = generate_response(model, tokenizer, example.prompt, args)
-            score = score_example(example, prediction, args)
-            scores.append(score)
-            raw_predictions.append(
-                {
-                    "model_name": model_name,
-                    "task_name": example.task_name,
-                    "record_id": example.record_id,
-                    "prompt": example.prompt,
-                    "gold_answer": example.gold_answer,
-                    "gold_program": example.gold_program,
-                    "prediction": prediction,
-                    "answer_correct": score["answer_correct"],
-                    "program_correct": score["program_correct"],
-                    "metadata": example.metadata,
-                }
+        for example_index, example in enumerate(tqdm(benchmark_examples, desc=f"Evaluating {model_name}")):
+            greedy_score, greedy_row = score_generation(
+                model,
+                tokenizer,
+                model_name,
+                example,
+                args,
+                generation_mode="greedy",
+                candidate_index=0,
+                temperature=0.0,
+                top_p=None,
+                do_sample=False,
+                seed=None,
             )
+            raw_predictions.append(greedy_row)
+
+            sampled_scores: List[Dict[str, Any]] = []
+            for candidate_index in range(args.num_samples_per_example):
+                sample_seed = args.sample_seed + example_index * args.num_samples_per_example + candidate_index
+                sampled_score, sampled_row = score_generation(
+                    model,
+                    tokenizer,
+                    model_name,
+                    example,
+                    args,
+                    generation_mode="sampled",
+                    candidate_index=candidate_index,
+                    temperature=args.sample_temperature,
+                    top_p=args.sample_top_p,
+                    do_sample=True,
+                    seed=sample_seed,
+                )
+                sampled_scores.append(sampled_score)
+                raw_predictions.append(sampled_row)
+
+            scores.append(build_example_summary_score(greedy_score, sampled_scores, pass_k_values))
 
         save_jsonl(output_dir / f"{model_name}_predictions.jsonl", raw_predictions)
         summary_rows = aggregate_scores(model_name, scores)

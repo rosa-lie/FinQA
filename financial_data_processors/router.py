@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -30,6 +31,9 @@ DPO_STRUCTURED_ANCHORS = [
     "推理：",
     "解释：",
 ]
+
+NORMALIZED_ANSWER_RE = re.compile(r"(?m)^Normalized Answer:\s*(.*)$")
+ANSWER_RE = re.compile(r"(?m)^Answer:\s*(.*)$")
 
 
 def _check_dpo_row(row: Dict[str, Any]) -> str | None:
@@ -108,6 +112,63 @@ def _has_json_like_evidence(item: Dict[str, Any]) -> bool:
     return '{"text_' in text or '{"table_' in text
 
 
+def _extract_target_label(item: Dict[str, Any]) -> str:
+    conversations = item.get("conversations") if isinstance(item.get("conversations"), list) else []
+    if len(conversations) < 2 or not isinstance(conversations[1], dict):
+        return ""
+    text = to_text(conversations[1].get("value"))
+    match = NORMALIZED_ANSWER_RE.search(text)
+    if match:
+        return to_text(match.group(1))
+    match = ANSWER_RE.search(text)
+    if match:
+        return to_text(match.group(1))
+    return ""
+
+
+def _postprocess_sft_rows(rows: List[Dict[str, Any]], args: Any) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    if not parse_bool_arg(getattr(args, "filter_conflicting_prompts", "true")):
+        return rows, {
+            "conflict_prompt_groups": 0,
+            "conflict_prompt_rows": 0,
+        }
+
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        conversations = row.get("conversations") if isinstance(row.get("conversations"), list) else []
+        prompt = to_text(conversations[0].get("value")) if conversations and isinstance(conversations[0], dict) else ""
+        grouped[prompt].append(row)
+
+    conflict_prompts = {
+        prompt
+        for prompt, items in grouped.items()
+        if prompt and len({normalize_question_for_label(_extract_target_label(item)) for item in items if _extract_target_label(item)}) > 1
+    }
+    if not conflict_prompts:
+        return rows, {
+            "conflict_prompt_groups": 0,
+            "conflict_prompt_rows": 0,
+        }
+
+    kept = []
+    dropped = 0
+    for row in rows:
+        conversations = row.get("conversations") if isinstance(row.get("conversations"), list) else []
+        prompt = to_text(conversations[0].get("value")) if conversations and isinstance(conversations[0], dict) else ""
+        if prompt in conflict_prompts:
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, {
+        "conflict_prompt_groups": len(conflict_prompts),
+        "conflict_prompt_rows": dropped,
+    }
+
+
+def normalize_question_for_label(text: Any) -> str:
+    return " ".join(to_text(text).lower().split())
+
+
 def _inc_flag_stats(stats: Dict[str, int], norm: Dict[str, Any]) -> None:
     tier = to_text(norm.get("quality_tier") or "C").upper() or "C"
     stats[f"tier_{tier}_rows"] = stats.get(f"tier_{tier}_rows", 0) + 1
@@ -160,9 +221,21 @@ def _process_family_records(
     normalized_rows: List[Dict[str, Any]] = []
     audit_rows: List[Dict[str, Any]] = []
 
-    if family == "convfinqa_turn" and parse_bool_arg(args.convfinqa_keep_final_only):
-        records, dedupe_stats = module.dedupe_final_turn(records)
-        family_stats.update(dedupe_stats)
+    if family == "convfinqa_turn":
+        convfinqa_mode = getattr(args, "convfinqa_mode", "turn_level")
+        if convfinqa_mode == "legacy_dedupe" or (
+            convfinqa_mode == "turn_level" and parse_bool_arg(getattr(args, "convfinqa_keep_final_only", "false"))
+        ):
+            records, dedupe_stats = module.dedupe_final_turn(records)
+            family_stats.update(dedupe_stats)
+        elif convfinqa_mode == "final_turn_only":
+            records, dedupe_stats = module.select_final_turn(records)
+            family_stats.update(dedupe_stats)
+        else:
+            family_stats.update({
+                "raw_turn_rows": len(records),
+                "saved_turn_rows": len(records),
+            })
     if family == "convfinqa_turn" and hasattr(module, "prepare_multiturn_records"):
         records, multiturn_stats = module.prepare_multiturn_records(records, args)
         family_stats.update(multiturn_stats)
@@ -279,6 +352,12 @@ def run_pipeline(task: str, args: Any) -> Dict[str, Any]:
             **family_stats,
         }
 
+    sft_postprocess_stats: Dict[str, int] = {}
+    if task == "sft":
+        before_sft_postprocess = len(output_rows)
+        output_rows, sft_postprocess_stats = _postprocess_sft_rows(output_rows, args)
+        total_skipped += before_sft_postprocess - len(output_rows)
+
     out_path = Path(args.output_file)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
@@ -303,6 +382,8 @@ def run_pipeline(task: str, args: Any) -> Dict[str, Any]:
         "audit_rows": len(audit_output_rows),
         "per_family": family_outputs,
     }
+    if sft_postprocess_stats:
+        summary["sft_post_filter"] = sft_postprocess_stats
 
     conv_stats = family_outputs.get("convfinqa_turn")
     if conv_stats:
@@ -334,8 +415,10 @@ def build_common_parser(default_task: str | None = None) -> argparse.ArgumentPar
     parser.add_argument("--audit_output_file", type=str, default=None)
     parser.add_argument("--dataset_family", type=str, default="auto", choices=sorted(DATASET_FAMILIES))
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--convfinqa_keep_final_only", type=str, default="true")
-    parser.add_argument("--sft_variant", type=str, default="benchmark_sft", choices=["benchmark_sft", "assistant_sft"])
+    parser.add_argument("--convfinqa_keep_final_only", type=str, default="false")
+    parser.add_argument("--convfinqa_mode", type=str, default="turn_level", choices=["turn_level", "final_turn_only", "legacy_dedupe"])
+    parser.add_argument("--filter_conflicting_prompts", type=str, default="true")
+    parser.add_argument("--sft_variant", type=str, default="benchmark_sft", choices=["benchmark_sft", "assistant_sft", "dual_answer_sft"])
     parser.add_argument("--strict_tiers", type=str, default="A")
     parser.add_argument("--max_history_turns", type=int, default=6)
     parser.add_argument("--max_context_items", type=int, default=6)

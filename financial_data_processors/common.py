@@ -184,6 +184,15 @@ def evidence_item_visible_in_prompt(evidence: Dict[str, Any], prompt: str, progr
 
 def _prompt_report_context(prompt: str) -> str:
     text = to_text(prompt)
+    report_idx = text.find("\n\nReport context:")
+    if report_idx >= 0:
+        start = report_idx + len("\n\nReport context:")
+        end = len(text)
+        for marker in ["\n\nConversation history:", "\n\nConversation history questions:"]:
+            idx = text.find(marker, start)
+            if idx >= 0:
+                end = min(end, idx)
+        return text[start:end]
     markers = ["\n\nCurrent question:", "\n\nRespond exactly in this format:"]
     end = len(text)
     for marker in markers:
@@ -327,6 +336,7 @@ def parse_bool_arg(v: Any) -> bool:
 
 def canonicalize_program_re(program_re: Any) -> str:
     program = normalize_ws(to_text(program_re))
+    program = re.sub(r"\bconst_(-?\d+(?:\.\d+)?)\b", r"\1", program, flags=re.IGNORECASE)
     program = re.sub(r"\s*,\s*", ", ", program)
     program = re.sub(r"\s*\(\s*", "(", program)
     program = re.sub(r"\s*\)\s*", ")", program)
@@ -491,6 +501,22 @@ def choose_answer_display(raw_answer: Any, answer_norm: str, question: str = "")
     if norm_num is not None and any(token in q for token in ["percentage", "percent", "rate"]):
         return _format_float(norm_num * 100.0, 1) + "%"
     return norm_text or raw_text
+
+
+def infer_answer_unit_scale(question: Any, raw_answer: Any, answer_display: Any) -> Tuple[str, str]:
+    text = " ".join([to_text(question), to_text(raw_answer), to_text(answer_display)]).lower()
+    answer_unit = "number"
+    answer_scale = "absolute"
+    if any(token in text for token in ["%", "percent", "percentage", "rate", "growth"]):
+        answer_unit = "percent"
+        answer_scale = "ratio"
+    elif "$" in text:
+        answer_unit = "currency"
+    if "billion" in text:
+        answer_scale = "billion"
+    elif "million" in text:
+        answer_scale = "million"
+    return answer_unit, answer_scale
 
 
 def extract_program_numbers(program_canonical: str) -> List[str]:
@@ -818,6 +844,7 @@ def build_reasoning_supervision(
 
     answer_norm, answer_flags, answer_matches_program = choose_answer_norm(raw_answer, exe_ans, program_value)
     answer_display = choose_answer_display(raw_answer, answer_norm, question)
+    answer_unit, answer_scale = infer_answer_unit_scale(question, raw_answer, answer_display)
     audit_flags.extend(answer_flags)
     semantic_audit_flags = detect_semantic_audit_flags(question, aligned_evidence, program_canonical)
     semantic_audit_flags.extend(evidence_improvement_flags)
@@ -843,6 +870,9 @@ def build_reasoning_supervision(
         "answer_exe": safe_jsonable(exe_ans),
         "answer_norm": answer_norm,
         "answer_display": answer_display,
+        "answer_unit": answer_unit,
+        "answer_scale": answer_scale,
+        "answer_source": "program_executable" if program_value is not None else "raw_answer",
         "answer_matches_program": answer_matches_program,
         "aligned_evidence": aligned_evidence,
         "evidence_match_type": evidence_match_type,
@@ -863,6 +893,13 @@ def render_strict_target(norm: Dict[str, Any], sft_variant: str = "benchmark_sft
         if text:
             evidence_lines.append(f"- {text}")
     evidence_text = "\n".join(evidence_lines)
+    if sft_variant == "dual_answer_sft":
+        return "\n\n".join([
+            evidence_text,
+            f"Program: {to_text(norm.get('program_canonical'))}",
+            f"Answer: {to_text(norm.get('answer_display') or norm.get('answer_norm'))}",
+            f"Normalized Answer: {to_text(norm.get('answer_norm'))}",
+        ])
     answer_key = "answer_display" if sft_variant == "assistant_sft" else "answer_norm"
     return "\n\n".join([
         evidence_text,
@@ -887,6 +924,9 @@ def build_audit_item(norm: Dict[str, Any]) -> Dict[str, Any]:
         "answer_exe": norm.get("answer_exe"),
         "answer_norm": norm.get("answer_norm", ""),
         "answer_display": norm.get("answer_display", ""),
+        "answer_unit": norm.get("answer_unit", ""),
+        "answer_scale": norm.get("answer_scale", ""),
+        "answer_source": norm.get("answer_source", ""),
         "quality_tier": norm.get("quality_tier", ""),
         "semantic_audit_flags": norm.get("semantic_audit_flags", []),
         "evidence_visible_in_prompt": norm.get("evidence_visible_in_prompt"),

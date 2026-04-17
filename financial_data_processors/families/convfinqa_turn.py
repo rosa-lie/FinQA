@@ -401,11 +401,9 @@ def _finalize_history_leak_audits(norm: Dict[str, Any]) -> None:
         add_audit_flags(norm, audit_flags=flags, semantic_flags=semantic_flags)
 
 def build_prompt(rec: Dict[str, Any], question: str, history_turns: List[Dict[str, Any]], args: Any) -> str:
-    prompt_parts = [
-        "You are a financial conversational reasoning assistant.",
-        "Use the conversation history and report context to identify supporting evidence, produce the executable program, and give the final answer.",
-    ]
-    if history_turns:
+    def render_history() -> str:
+        if not history_turns:
+            return ""
         blocks: List[str] = []
         has_full_reasoning = any(to_text(item.get("target")) for item in history_turns)
         for item in history_turns:
@@ -420,7 +418,36 @@ def build_prompt(rec: Dict[str, Any], question: str, history_turns: List[Dict[st
             else:
                 blocks.append(f"- {q}")
         heading = "Conversation history:" if has_full_reasoning else "Conversation history questions:"
-        prompt_parts.append(heading + "\n" + "\n\n".join(blocks))
+        return heading + "\n" + "\n\n".join(blocks)
+
+    if getattr(args, "sft_variant", "benchmark_sft") == "dual_answer_sft":
+        prompt_parts = [
+            "You are a financial conversational reasoning assistant.",
+            f"Current question:\n{question}",
+            "Output format:\n"
+            "Evidence:\n"
+            "- ...\n\n"
+            "Program: ...\n"
+            "Answer: ...\n"
+            "Normalized Answer: ...",
+            "Normalization rule:\n"
+            "- For percentage questions, Normalized Answer must be a decimal ratio.\n"
+            "- Answer may use natural units such as %, $, million, billion.",
+        ]
+        context_sections = build_english_context_sections(rec, args)
+        if context_sections:
+            prompt_parts.append("Report context:\n" + "\n\n".join(context_sections))
+        history_text = render_history()
+        if history_text:
+            prompt_parts.append(history_text)
+        return "\n\n".join(prompt_parts)
+
+    prompt_parts = [
+        "You are a financial conversational reasoning assistant.",
+        "Use the conversation history and report context to identify supporting evidence, produce the executable program, and give the final answer.",
+    ]
+    if history_turns:
+        prompt_parts.append(render_history())
     prompt_parts.extend(build_english_context_sections(rec, args))
     prompt_parts.append(f"Current question: {question}")
     prompt_parts.append(
@@ -507,6 +534,9 @@ def render_sft_item(norm: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]
             "answer_exe": norm.get("answer_exe"),
             "answer_norm": norm.get("answer_norm", ""),
             "answer_display": norm.get("answer_display", ""),
+            "answer_unit": norm.get("answer_unit", ""),
+            "answer_scale": norm.get("answer_scale", ""),
+            "answer_source": norm.get("answer_source", ""),
             "answer_matches_program": norm.get("answer_matches_program", False),
             "aligned_evidence": norm.get("aligned_evidence", []),
             "evidence_match_type": norm.get("evidence_match_type", ""),
@@ -572,6 +602,32 @@ def dedupe_final_turn(records: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str,
         "fallback_selected_rows": fallback_selected_rows,
     }
     return selected, stats
+
+
+def select_final_turn(records: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    order: List[str] = []
+    best_by_conversation: Dict[str, Dict[str, Any]] = {}
+    rank_by_conversation: Dict[str, Tuple[int, int]] = {}
+
+    for rec in records:
+        conversation_id = _conversation_id(rec)
+        rank = _turn_rank(rec)
+        if conversation_id not in best_by_conversation:
+            order.append(conversation_id)
+            best_by_conversation[conversation_id] = rec
+            rank_by_conversation[conversation_id] = rank
+            continue
+        if rank > rank_by_conversation[conversation_id]:
+            best_by_conversation[conversation_id] = rec
+            rank_by_conversation[conversation_id] = rank
+
+    selected = [best_by_conversation[key] for key in order]
+    return selected, {
+        "raw_turn_rows": len(records),
+        "saved_turn_rows": len(selected),
+        "conversation_count": len(order),
+        "final_turn_dropped_rows": max(0, len(records) - len(selected)),
+    }
 
 
 def build_dpo_item(rec: Dict[str, Any], args: Any) -> Optional[Dict[str, Any]]:

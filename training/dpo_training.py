@@ -4,13 +4,14 @@
 @description: Train a model from SFT using DPO
 """
 import os
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field
 from glob import glob
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import torch
-from datasets import load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from loguru import logger
 from peft import LoraConfig, TaskType
 from transformers import (
@@ -28,6 +29,74 @@ from template import get_conv_template
 
 os.environ["TOKENIZERS_PARALLELISM"] = "FALSE"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+
+DPO_REQUIRED_COLUMNS = ("system", "history", "question", "response_chosen", "response_rejected")
+
+
+def _iter_json_records(path: str) -> Iterable[Dict[str, Any]]:
+    if path.endswith(".jsonl"):
+        with open(path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid JSON in {path}:{line_no}: {exc}") from exc
+        return
+
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if isinstance(payload, list):
+        yield from payload
+    elif isinstance(payload, dict):
+        records = payload.get("data", payload.get("train", payload.get("records")))
+        if isinstance(records, list):
+            yield from records
+        else:
+            yield payload
+    else:
+        raise ValueError(f"Unsupported JSON payload in {path}: {type(payload).__name__}")
+
+
+def _normalize_history(history: Any) -> List[List[str]]:
+    if not history:
+        return []
+    normalized = []
+    for turn in history:
+        if isinstance(turn, (list, tuple)) and len(turn) >= 2:
+            normalized.append(["" if turn[0] is None else str(turn[0]), "" if turn[1] is None else str(turn[1])])
+    return normalized
+
+
+def _dpo_dataset_from_records(records: List[Dict[str, Any]]) -> Dataset:
+    if records:
+        return Dataset.from_list(records)
+    return Dataset.from_dict({column: [] for column in DPO_REQUIRED_COLUMNS})
+
+
+def _load_dpo_json_dataset(data_files: Dict[str, List[str]]) -> DatasetDict:
+    datasets = DatasetDict()
+    for split_name, paths in data_files.items():
+        records = []
+        for path in sorted(paths):
+            for row in _iter_json_records(path):
+                missing = [column for column in DPO_REQUIRED_COLUMNS if column not in row]
+                if missing:
+                    raise ValueError(f"{path} is missing required DPO columns: {', '.join(missing)}")
+                records.append(
+                    {
+                        "system": "" if row.get("system") is None else str(row.get("system")),
+                        "history": _normalize_history(row.get("history")),
+                        "question": "" if row.get("question") is None else str(row.get("question")),
+                        "response_chosen": "" if row.get("response_chosen") is None else str(row.get("response_chosen")),
+                        "response_rejected": "" if row.get("response_rejected") is None else str(row.get("response_rejected")),
+                    }
+                )
+        datasets[split_name] = _dpo_dataset_from_records(records)
+    return datasets
 
 
 @dataclass
@@ -257,25 +326,18 @@ def main():
                 f'{args.validation_file_dir}/**/*.jsonl', recursive=True)
             logger.info(f"eval files: {', '.join(eval_data_files)}")
             data_files["validation"] = eval_data_files
-        raw_datasets = load_dataset(
-            'json',
-            data_files=data_files,
-            cache_dir=args.cache_dir,
-        )
+        if "train" not in data_files or not data_files["train"]:
+            raise ValueError(f"No local DPO train files found under --train_file_dir={args.train_file_dir!r}")
+        raw_datasets = _load_dpo_json_dataset(data_files)
         # If no validation data is there, validation_split_percentage will be used to divide the dataset.
         if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                'json',
-                data_files=data_files,
-                split=f"train[:{args.validation_split_percentage}%]",
-                cache_dir=args.cache_dir,
-            )
-            raw_datasets["train"] = load_dataset(
-                'json',
-                data_files=data_files,
-                split=f"train[{args.validation_split_percentage}%:]",
-                cache_dir=args.cache_dir,
-            )
+            split_pct = max(0, min(100, args.validation_split_percentage))
+            if split_pct > 0 and len(raw_datasets["train"]) > 1:
+                split = raw_datasets["train"].train_test_split(test_size=split_pct / 100, seed=42, shuffle=False)
+                raw_datasets["train"] = split["train"]
+                raw_datasets["validation"] = split["test"]
+            else:
+                raw_datasets["validation"] = _dpo_dataset_from_records([])
     logger.info(f"Raw datasets: {raw_datasets}")
 
     # Preprocessing the datasets
