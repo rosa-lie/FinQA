@@ -123,6 +123,11 @@ def _extract_target_label(item: Dict[str, Any]) -> str:
     match = ANSWER_RE.search(text)
     if match:
         return to_text(match.group(1))
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    answer_norm = to_text(metadata.get("answer_norm"))
+    program_canonical = to_text(metadata.get("program_canonical"))
+    if answer_norm or program_canonical:
+        return f"{answer_norm}\n{program_canonical}"
     return ""
 
 
@@ -418,7 +423,7 @@ def build_common_parser(default_task: str | None = None) -> argparse.ArgumentPar
     parser.add_argument("--convfinqa_keep_final_only", type=str, default="false")
     parser.add_argument("--convfinqa_mode", type=str, default="turn_level", choices=["turn_level", "final_turn_only", "legacy_dedupe"])
     parser.add_argument("--filter_conflicting_prompts", type=str, default="true")
-    parser.add_argument("--sft_variant", type=str, default="benchmark_sft", choices=["benchmark_sft", "assistant_sft", "dual_answer_sft"])
+    parser.add_argument("--sft_variant", type=str, default="benchmark_sft", choices=["benchmark_sft", "assistant_sft", "dual_answer_sft", "program_executor_sft"])
     parser.add_argument("--strict_tiers", type=str, default="A")
     parser.add_argument("--max_history_turns", type=int, default=6)
     parser.add_argument("--max_context_items", type=int, default=6)

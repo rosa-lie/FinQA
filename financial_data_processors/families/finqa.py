@@ -33,19 +33,36 @@ def maybe_rewrite_finqa_question(question: str, norm: Dict[str, Any]) -> str:
 
 
 def build_prompt(rec: Dict[str, Any], question: str, args: Any) -> str:
-    if getattr(args, "sft_variant", "benchmark_sft") == "dual_answer_sft":
+    if getattr(args, "sft_variant", "benchmark_sft") in {"dual_answer_sft", "program_executor_sft"}:
+        if getattr(args, "sft_variant", "benchmark_sft") == "program_executor_sft":
+            output_format = (
+                "Output format:\n"
+                "Evidence:\n"
+                "- ...\n\n"
+                "Program: ...\n\n"
+                "The final numeric answer will be computed by executing Program.\n"
+                "Do not calculate or round the final answer yourself."
+            )
+            rule_text = "Program rule:\n- Use only executable numeric DSL expressions such as add, subtract, multiply, divide, max, min, sum, average."
+        else:
+            output_format = (
+                "Output format:\n"
+                "Evidence:\n"
+                "- ...\n\n"
+                "Program: ...\n"
+                "Answer: ...\n"
+                "Normalized Answer: ..."
+            )
+            rule_text = (
+                "Normalization rule:\n"
+                "- For percentage questions, Normalized Answer must be a decimal ratio.\n"
+                "- Answer may use natural units such as %, $, million, billion."
+            )
         prompt_parts = [
             "You are a financial table-and-text reasoning assistant.",
             f"Current question:\n{question}",
-            "Output format:\n"
-            "Evidence:\n"
-            "- ...\n\n"
-            "Program: ...\n"
-            "Answer: ...\n"
-            "Normalized Answer: ...",
-            "Normalization rule:\n"
-            "- For percentage questions, Normalized Answer must be a decimal ratio.\n"
-            "- Answer may use natural units such as %, $, million, billion.",
+            output_format,
+            rule_text,
         ]
         context_sections = build_english_context_sections(rec, args)
         if context_sections:

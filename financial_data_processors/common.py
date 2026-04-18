@@ -900,6 +900,11 @@ def render_strict_target(norm: Dict[str, Any], sft_variant: str = "benchmark_sft
             f"Answer: {to_text(norm.get('answer_display') or norm.get('answer_norm'))}",
             f"Normalized Answer: {to_text(norm.get('answer_norm'))}",
         ])
+    if sft_variant == "program_executor_sft":
+        return "\n\n".join([
+            evidence_text,
+            f"Program: {to_text(norm.get('program_canonical'))}",
+        ])
     answer_key = "answer_display" if sft_variant == "assistant_sft" else "answer_norm"
     return "\n\n".join([
         evidence_text,

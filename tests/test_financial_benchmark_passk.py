@@ -24,6 +24,12 @@ def score(answer_correct, task_name="finqa_test"):
         "structured_response_coverage": 1.0,
         "prediction_chars": 1,
         "numeric_parse_rate": 1.0,
+        "program_parse_rate": 1.0,
+        "program_execution_rate": 1.0,
+        "executed_answer_accuracy": float(answer_correct),
+        "model_normalized_answer_accuracy": float(answer_correct),
+        "program_answer_consistency": 1.0,
+        "program_string_accuracy": None,
     }
 
 
@@ -83,6 +89,54 @@ def test_score_example_uses_normalized_answer_and_program():
     )
 
     assert score_row["answer_correct"] == 1.0
+    assert score_row["executed_answer_accuracy"] == 1.0
+    assert score_row["model_normalized_answer_accuracy"] == 1.0
     assert score_row["program_correct"] == 1.0
     assert score_row["answer_coverage"] == 1.0
     assert score_row["normalized_answer_coverage"] == 1.0
+
+
+def test_score_example_uses_executed_program_when_model_answer_is_rounded_wrong():
+    example = BenchmarkExample(
+        task_name="finqa_test",
+        prompt="Question",
+        gold_answer="0.14464",
+        answer_type="numeric",
+        record_id="row",
+        metadata={},
+        gold_program="divide(8.1, 56.0)",
+    )
+    args = type("Args", (), {"numeric_abs_tol": 1e-4, "numeric_rel_tol": 1e-4})()
+    score_row = score_example(
+        example,
+        "Evidence:\n- x\n\nProgram: divide(8.1, 56.0)\nAnswer: 14.4%\nNormalized Answer: 0.1443",
+        args,
+    )
+
+    assert score_row["answer_correct"] == 1.0
+    assert score_row["executed_answer_accuracy"] == 1.0
+    assert score_row["model_normalized_answer_accuracy"] == 0.0
+    assert score_row["program_answer_consistency"] == 0.0
+
+
+def test_score_example_marks_unexecutable_program_wrong_even_with_model_answer():
+    example = BenchmarkExample(
+        task_name="finqa_test",
+        prompt="Question",
+        gold_answer="0.14464",
+        answer_type="numeric",
+        record_id="row",
+        metadata={},
+        gold_program="divide(8.1, 56.0)",
+    )
+    args = type("Args", (), {"numeric_abs_tol": 1e-4, "numeric_rel_tol": 1e-4})()
+    score_row = score_example(
+        example,
+        "Evidence:\n- x\n\nProgram: use nearby numbers\nAnswer: 14.464%\nNormalized Answer: 0.14464",
+        args,
+    )
+
+    assert score_row["answer_correct"] == 0.0
+    assert score_row["executed_answer_accuracy"] == 0.0
+    assert score_row["model_normalized_answer_accuracy"] == 1.0
+    assert score_row["program_execution_rate"] == 0.0

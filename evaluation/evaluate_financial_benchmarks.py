@@ -20,7 +20,12 @@ from datasets import load_dataset
 from peft import PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, GenerationConfig
-from financial_data_processors.common import iter_records
+from financial_data_processors.common import (
+    canonicalize_program_re,
+    execute_program,
+    format_numeric_answer,
+    iter_records,
+)
 from financial_data_processors.families import FAMILY_MODULES
 
 
@@ -36,7 +41,7 @@ NORMALIZED_ANSWER_RE = re.compile(r"(?m)^Normalized Answer\s*[:：]\s*(.+)$", re
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
-NUMERIC_STRUCTURED_ANCHORS = ["Evidence:", "Program:", "Answer:", "Normalized Answer:"]
+NUMERIC_STRUCTURED_ANCHORS = ["Evidence:", "Program:"]
 MCQ_STRUCTURED_ANCHORS = ["题目理解：", "推理：", "最终答案："]
 
 
@@ -109,6 +114,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cflue_max_samples_per_task", type=int, default=0)
     parser.add_argument("--numeric_abs_tol", type=float, default=1e-4)
     parser.add_argument("--numeric_rel_tol", type=float, default=1e-4)
+    parser.add_argument(
+        "--processor_sft_variant",
+        type=str,
+        default="dual_answer_sft",
+        choices=["dual_answer_sft", "program_executor_sft"],
+        help="Prompt/target variant used by the data processors when building benchmark examples.",
+    )
     parser.add_argument("--output_dir", type=str, required=True)
     return parser.parse_args()
 
@@ -296,9 +308,9 @@ def build_numeric_example_from_processor(record: Dict[str, Any], family: str, ta
         return None
     prompt = to_text(conversations[0].get("value"))
     chosen = to_text(conversations[1].get("value"))
-    gold_answer = extract_final_answer(chosen)
     metadata = dict(item.get("metadata") or {})
     metadata.setdefault("source_dataset", item.get("source_dataset", family))
+    gold_answer = to_text(metadata.get("answer_norm")) or extract_final_answer(chosen)
     gold_program = to_text(metadata.get("program_canonical") or metadata.get("program"))
     if not prompt or not gold_answer:
         return None
@@ -550,6 +562,14 @@ def normalize_program(text: str) -> str:
     return re.sub(r"\s+", "", (text or "").lower())
 
 
+def execute_prediction_program(program_text: str) -> Tuple[Optional[float], str, str]:
+    program_canonical = canonicalize_program_re(program_text)
+    if not program_canonical:
+        return None, "", "missing_program"
+    value, error = execute_program(program_canonical)
+    return value, program_canonical, error or ""
+
+
 def parse_number(text: str) -> Optional[float]:
     if not text:
         return None
@@ -579,6 +599,24 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
     normalized_answer = extract_normalized_answer(prediction)
     answer = extract_display_answer(prediction) or extract_section(extract_answer_body(prediction), FINAL_ANSWER_RE) or extract_answer_body(prediction).strip().split("\n")[0].strip()
     program_section = extract_section(prediction, PROGRAM_RE)
+    executed_value, executed_program_canonical, program_error = execute_prediction_program(program_section)
+    gold_num = parse_number(example.gold_answer)
+    model_pred_num = parse_number(prediction)
+    model_answer_correct = None
+    if model_pred_num is not None and gold_num is not None:
+        model_answer_correct = float(
+            math.isclose(model_pred_num, gold_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol)
+        )
+    executed_answer_correct = None
+    if executed_value is not None and gold_num is not None:
+        executed_answer_correct = float(
+            math.isclose(executed_value, gold_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol)
+        )
+    program_answer_consistency = None
+    if executed_value is not None and model_pred_num is not None:
+        program_answer_consistency = float(
+            math.isclose(executed_value, model_pred_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol)
+        )
     if example.answer_type == "numeric":
         structured_anchors = NUMERIC_STRUCTURED_ANCHORS
     elif example.answer_type == "mcq":
@@ -600,19 +638,35 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         "structured_response_coverage": float(all(anchor in (prediction or "") for anchor in structured_anchors)),
         "prediction_chars": len((prediction or "").strip()),
         "numeric_parse_rate": None,
+        "program_parse_rate": None,
+        "program_execution_rate": None,
+        "executed_answer_accuracy": None,
+        "model_normalized_answer_accuracy": None,
+        "program_answer_consistency": None,
+        "program_string_accuracy": None,
+        "executed_program": executed_program_canonical,
+        "executed_program_answer": format_numeric_answer(executed_value) if executed_value is not None else "",
+        "program_execution_error": program_error,
     }
     if example.answer_type == "numeric":
-        pred_num = parse_number(prediction)
-        gold_num = parse_number(example.gold_answer)
-        result["numeric_parse_rate"] = float(pred_num is not None)
-        if pred_num is not None and gold_num is not None:
-            result["answer_correct"] = float(
-                math.isclose(pred_num, gold_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol)
-            )
-        else:
+        result["numeric_parse_rate"] = float(model_pred_num is not None)
+        result["program_parse_rate"] = float(bool(program_section))
+        result["program_execution_rate"] = float(executed_value is not None)
+        result["executed_answer_accuracy"] = float(executed_answer_correct or 0.0)
+        result["model_normalized_answer_accuracy"] = float(model_answer_correct or 0.0) if model_answer_correct is not None else 0.0
+        result["program_answer_consistency"] = program_answer_consistency
+        result["answer_correct"] = result["executed_answer_accuracy"]
+        if executed_value is None and model_pred_num is not None and gold_num is not None:
+            result["answer_correct"] = 0.0
+        elif executed_value is None:
+            result["answer_correct"] = 0.0
+        if gold_num is None:
             result["answer_correct"] = float(normalize_answer_text(prediction) == normalize_answer_text(example.gold_answer))
+        else:
+            result["answer_correct"] = result["executed_answer_accuracy"]
         if example.gold_program:
             result["program_correct"] = float(normalize_program(program_section) == normalize_program(example.gold_program))
+            result["program_string_accuracy"] = result["program_correct"]
     elif example.answer_type == "mcq":
         pred_option = extract_option(prediction)
         gold_option = extract_option(example.gold_answer)
@@ -676,6 +730,12 @@ def build_example_summary_score(
 def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, Any]]) -> Dict[str, Any]:
     answer_scores = [item["answer_correct"] for item in scores]
     program_scores = [item["program_correct"] for item in scores if item["program_correct"] is not None]
+    program_parse_scores = [item["program_parse_rate"] for item in scores if item.get("program_parse_rate") is not None]
+    program_execution_scores = [item["program_execution_rate"] for item in scores if item.get("program_execution_rate") is not None]
+    executed_answer_scores = [item["executed_answer_accuracy"] for item in scores if item.get("executed_answer_accuracy") is not None]
+    model_normalized_scores = [item["model_normalized_answer_accuracy"] for item in scores if item.get("model_normalized_answer_accuracy") is not None]
+    program_answer_consistency_scores = [item["program_answer_consistency"] for item in scores if item.get("program_answer_consistency") is not None]
+    program_string_scores = [item["program_string_accuracy"] for item in scores if item.get("program_string_accuracy") is not None]
     answer_coverage_scores = [item.get("answer_coverage", item.get("final_answer_coverage", 0.0)) for item in scores]
     normalized_answer_scores = [item.get("normalized_answer_coverage", 0.0) for item in scores]
     final_answer_scores = [item.get("final_answer_coverage", item.get("answer_coverage", 0.0)) for item in scores]
@@ -693,6 +753,12 @@ def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, A
         "pass@1_greedy": _mean([item["pass@1_greedy"] for item in scores if item.get("pass@1_greedy") != ""]),
         "pass@1_sampled": _mean([item["pass@1_sampled"] for item in scores if item.get("pass@1_sampled") != ""]),
         "program_accuracy": _mean(program_scores),
+        "program_parse_rate": _mean(program_parse_scores),
+        "program_execution_rate": _mean(program_execution_scores),
+        "executed_answer_accuracy": _mean(executed_answer_scores),
+        "model_normalized_answer_accuracy": _mean(model_normalized_scores),
+        "program_answer_consistency": _mean(program_answer_consistency_scores),
+        "program_string_accuracy": _mean(program_string_scores),
         "answer_coverage": _mean(answer_coverage_scores),
         "normalized_answer_coverage": _mean(normalized_answer_scores),
         "final_answer_coverage": _mean(final_answer_scores),
@@ -768,6 +834,15 @@ def build_prediction_row(
         "prediction": prediction,
         "answer_correct": score["answer_correct"],
         "program_correct": score["program_correct"],
+        "program_parse_rate": score.get("program_parse_rate"),
+        "program_execution_rate": score.get("program_execution_rate"),
+        "executed_answer_accuracy": score.get("executed_answer_accuracy"),
+        "executed_program": score.get("executed_program", ""),
+        "executed_program_answer": score.get("executed_program_answer", ""),
+        "program_execution_error": score.get("program_execution_error", ""),
+        "model_normalized_answer_accuracy": score.get("model_normalized_answer_accuracy"),
+        "program_answer_consistency": score.get("program_answer_consistency"),
+        "program_string_accuracy": score.get("program_string_accuracy"),
         "metadata": example.metadata,
     }
 
@@ -811,6 +886,7 @@ def unload_model(model, tokenizer) -> None:
 
 def main() -> None:
     args = parse_args()
+    PROCESSOR_ARGS.sft_variant = args.processor_sft_variant
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     pass_k_values = parse_pass_k_values(args.pass_k)
@@ -870,6 +946,8 @@ def main() -> None:
         "sample_temperature": args.sample_temperature,
         "sample_top_p": args.sample_top_p,
         "sample_seed": args.sample_seed,
+        "processor_sft_variant": args.processor_sft_variant,
+        "primary_metric": "executed_answer_accuracy",
     }
     (output_dir / "benchmark_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
