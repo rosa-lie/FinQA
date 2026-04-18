@@ -1,328 +1,262 @@
-# 任务：金融对话数值推理模型（FinGPT-R1）：Long CoT SFT → RL （轻量 DPO/GRPO） → benchmark 评估
+# Verifiable Program-Supervised Financial Reasoning
 
-> 金融大模型真正难的，不是“知道一个金融术语”，而是“在金融场景里正确推理”。
-> **面向金融对话数值推理的 reasoning model：以 ConvFinQA 和 FinQA 为核心，辅以中文金融考试推理数据，训练一个能够进行多轮、数值、表文混合推理的金融小模型。**
-> 在数据侧，我以 ConvFinQA 和 FinQA 为主干，分别覆盖多轮对话推理与表文混合数值推理，再用 fingpt-fineval 和少量 fingpt-fiqa_qa 做中文金融知识和基础问答补强；在训练侧，我先通过 SFT 让模型学会金融推理，再基于答案正确性、程序一致性和结构约束设计可验证 reward 做轻量 GRPO；在评估侧，我用 FinQA/ConvFinQA 检验核心推理能力，用 CFLUE 检查中文泛化，用 FinanceBench 检查开放书金融 QA 迁移能力。这样形成了一个从训练到评估都围绕“金融 reasoning”展开的闭环。
+Verifiable Program-Supervised Financial Reasoning: Improving Fino1-style CoT Training with FinQA/ConvFinQA Program Execution
 
-> 【】代表待完成
+面向金融表文数值推理的可验证程序监督：在 Fino1 式 CoT 训练范式上的改进
 
-**项目介绍**：**FinGPT-R1**：一款为金融数值推理领域设计的大语言模型，采用轻量化的 7B 参数量级架构。在降低部署成本的同时，该模型通过在针对金融推理场景的高质量思维链数据上采用 SFT（监督微调）和 RL（强化学习）训练，为模型在金融领域的应用提供了坚实的理论支撑、业务规则、决策逻辑以及技术实现能力，从而有效提升模型的金融复杂推理能力，为银行、证券、保险以及信托等金融核心业务场景提供有力支持。   
+Fino1-style CoT + Verifiable PoT for Financial Numerical Reasoning
 
-**工作框架**：
-1. 基于 **DeepSeek-R1** 构建了数据蒸馏框架，并按当前代码实现落地为“生成多候选、统一打分、组内选择 `chosen/rejected`、产出 SFT/DPO/audit”。其中 SFT 正样本严格依赖 `clean_response`，DPO 负样本允许来自非 clean 但可用的原始 candidate response，从而兼顾训练纯度与对比难度。
-2. 在训练过程中，利用**Qwen2.5-7B-Instruct**，通过监督微调（SFT）和强化学习（RL）训练金融推理大模型，以提升金融推理任务的准确性和泛化能力。
+本项目是一个 Fino1-style financial reasoning post-training framework 的可验证程序推理改进版。在 Fino1-style CoT 金融推理 baseline 上，引入 FinQA/ConvFinQA 可执行 Program supervision 与 execution-based GRPO 的改进框架。
 
 
- - 高质量的金融推理数据集：Fin-R1-Data，这是一个从多个权威金融数据集中提炼和过滤出的高质量COT数据集，专门设计用于专业金融推理场景。Fin-R1-Data涵盖了中英金融领域的多维专业知识，可以有效支持多个核心金融业务场景。型语言模型，精确满足金融行业对于决策过程、数字严谨性和强大商业泛化能力的核心需求。
- - 两阶段模型构建框架：我们提出了一个两阶段的工作流程框架，包括构建高质量的CoT 数据集并通过监督微调 （SFT） 和强化学习 （RL） 训练模型，可以有效提高模型的财务推理性能。
+本项目以 Fino1-style 金融 reasoning SFT + GRPO 作为 baseline 范式，使用公开的 Fino1 Reasoning Path FinQA 和 FinCoT 作为 CoT 数据参考；在此基础上，引入 FinQA/ConvFinQA 的 gold Program 监督，将金融表文数值推理从 CoT-only 扩展到 Evidence-grounded CoT+PoT，并使用 Program execution correctness 进行可验证评估和强化学习优化。
 
 
-## 数据集
+| 实验组 | 说明 | 目的 |
+|---|---|---|
+| Base model | Qwen2.5-7B-Instruct | 原始基座 |
+| Fino1-style SFT | Fino1_Reasoning_Path_FinQA + FinCoT | CoT baseline |
+| Program SFT, v2 | FinQA/ConvFinQA `Evidence + Program + Answer + Normalized Answer` | 当前主线 |
+| Program executor SFT, v3 | FinQA/ConvFinQA `Evidence + Program` | PoT baseline |
+| Fino1-style + Program SFT | core program data + Fino1/FinCoT reasoning data | CoT+PoT |
+| Program SFT + GRPO | execution reward | 验证 program RL |
+| Fino1-style + Program SFT + GRPO | CoT supplement + execution reward | 最终模型 |
 
-**数据来源**：开源数据集包括**ConvFinQA** （陈等，2022），**FinQA** （陈等，2021）【Ant_Finance （支付宝团队，2023），FinanceIQ 独小漫DI 团队 （2023b），量化交易-指令 （FinanceQT） （Malik，2024）， Twitter-财经-新闻-情感 （TFNS） （匿名，2024），Finance-Instruct-500K （Flowers，2025），FinCorpus （独小漫DI 团队，2023a），和FinCUGE （Lu等，2023）】
+1. **从 CoT-only 到 CoT+PoT**
+   - Fino1/FinCoT 提供自然语言 reasoning path。
+   - 本项目加入 FinQA/ConvFinQA gold Program。
+   - 让模型不只解释，还能输出可执行计算结构。
 
-**数据构建**：为将 DeepSeek-R1 的推理能力迁移到金融场景，我们围绕 FinQA 与 ConvFinQA 搭建了多候选蒸馏链路，目标不是直接学习 teacher 的所有输出，而是把可验证、可比较、适合 student 学习的 reasoning 候选沉淀为训练数据。当前框架的核心不再是把每一层打分单独当作硬门槛，而是先对候选统一计算 answer check、reasoning selection 与 `quality_score`，再在同题候选内做最终选择。
+2. **从 answer reward 到 execution reward**
+   - Fino1-style GRPO 常见是 format + answer correctness。
+   - 本项目加入：
+     ```text
+     program parse reward
+     program execution reward
+     executed answer correctness reward
+     program-answer consistency reward
+     ```
+   - 这让 RL 更适合金融数值题。
 
-**数据蒸馏**：teacher 会为同一题生成多个 reasoning 候选，`distill/score_distill_candidates.py` 再按当前规则完成组内筛选。`chosen` 只从带完整 `<think>/<answer>` 的 `clean_response` 候选中选择，并直接取组内最高分作为 distilled SFT 和 DPO 的正样本；`rejected` 则从同组剩余候选中选择最低分者，只要求能够提取出原始 candidate response，因此允许来自非 clean 候选。若整组没有可用 `chosen`，则该组不会进入 SFT、DPO、audit 或 summary 输出。
-
-**数据筛选**
-
-**数据集分布**
-
-## 训练
-
-**第一阶段——推理能力注入**：针对金融推理任务中的复杂推理，我们第一阶段使用 ConvFinQA 和 FinQA 金融数据集对 Qwen2.5-7B-Instruct 进行了监督微调。经过一轮微调训练，确保模型能够深入理解并处理复杂的金融推理问题。
-
-**第二阶段——强化学习优化**：在模型掌握复杂推理技能后，我们采用 GRPO（Group Relative Policy Optimization）算法作为核心框架，【】。
-
-## 评估
-
-**评估**：在金融推理方面的ConvFinQA和FinQA
- - 评估流程：除 Finance-Instruct-500K 用分层采样的 10% test subset 外，其他数据集随机采样 1000 题，不足则全量；数值题不做生硬 exact match，而引入 LLM judge 处理格式差异和等价表达。来源
- - 评估结果：
-
-
-## 技术栈 / Tech Stack
-
-本项目的核心技术栈如下，均已在当前代码中实际使用：
-
-| 技术 / 框架 | 用途 |
-| --- | --- |
-| **Python** | 项目主语言；数据处理、训练、评估、推理与蒸馏脚本均基于 Python 实现 |
-| **PyTorch** | 底层深度学习训练与推理框架；SFT、DPO、GRPO、评测生成均运行在 PyTorch 生态上 |
-| **Hugging Face Transformers** | 模型加载、tokenizer、`generate` 推理、训练参数与模型配置管理 |
-| **Hugging Face Datasets** | 统一加载本地/HF 数据集，支撑训练集、评测集和多任务数据处理 |
-| **PEFT (LoRA / QLoRA)** | 参数高效微调；项目中的 LoRA adapter 训练、合并和推理都基于 PEFT |
-| **TRL** | 偏好优化与强化学习训练框架；用于 DPO、PPO、GRPO、ORPO 等对齐训练流程 |
-| **Accelerate** | 多卡/混合精度训练封装，支撑加速版训练流程与资源调度 |
-| **bitsandbytes** | 4-bit / 8-bit 量化加载，用于降低显存占用并支持 QLoRA 与低成本评估 |
-| **TensorBoard** | 训练过程中的 loss、eval 指标和实验日志可视化 |
-| **scikit-learn** | 部分数据处理与评测辅助组件依赖的通用机器学习工具库 |
-| **sentencepiece** | tokenizer 相关支持，适配部分基础模型和词表处理流程 |
-| **Gradio** | Web 交互式推理 demo，支持快速搭建本地问答页面 |
-| **FastAPI** | 提供推理服务接口，支持以 API 方式部署模型 |
-| **OpenAI-compatible API client** | 用于 teacher 蒸馏、judge 打分与角色数据生成；当前支持 OpenAI、DeepSeek、豆包、MiniMax |
-| **Jupyter Notebook** | 实验编排与复现实验流程；`run_fingpt_min.ipynb` 负责串联数据、训练、蒸馏和评测 |
-
-### 当前金融推理子项目实际使用到的模块
-
-- **数据处理**：`financial_data_processors/*`、`data/clean_sharegpt_dataset.py`、`data/audit_sharegpt_dirty_samples.py`、`data/filter_sharegpt_by_audit.py`
-- **SFT 训练**：`training/supervised_finetuning.py`、`training/supervised_finetuning_accelerate.py`
-- **偏好优化 / 强化学习**：`training/dpo_training.py`、`training/financial_grpo_training.py`、`training/ppo_training.py`、`training/orpo_training.py`
-- **蒸馏**：`distill/*`
-- **评测**：`evaluation/evaluate_financial_benchmarks.py`
-- **推理与服务**：`serving/inference.py`、`serving/gradio_demo.py`、`serving/fastapi_server_demo.py`
-
-这些框架共同组成了本项目的完整工作流：**数据构造 -> 蒸馏 -> SFT -> 偏好优化 / 强化学习 -> benchmark 评估 -> 部署推理**。
-
-# Done: 数据集
-
-> 我将训练数据划分为“金融语言理解”与“金融推理”两类，其中 FinQA 与 ConvFinQA 构成推理主干。
-> FinQA 提供表文混合、带结构化程序监督的金融数值推理样本，用于训练模型的多步计算与证据整合能力；ConvFinQA 则进一步将金融推理任务扩展到多轮对话场景，用于训练模型在连续交互中维持上下文并完成 follow-up reasoning。两者结合，使模型从“会回答金融问题”提升为“能在金融语境中持续推理”的 reasoning model。
-> **FinQA 让模型学会“怎么做金融推理”，ConvFinQA 让模型学会“怎么在对话中持续做金融推理”。**
-
-
-| 阶段       | 数据                            | 目标            | 说明               |
-| -------- | ----------------------------- | ------------- | ---------------- |
-| SFT-1    | FinQA                        | 学会表文混合数值推理    | 第一阶段            |
-| SFT-2    | ConvFinQA                    | 学会多轮 follow-up 推理 | 第二阶段            |
-| Joint SFT | FinQA + ConvFinQA            | 对比实验            | 混合训练 |
-| SFT（可选） | 其他Fin问答数据集            | 补充            |  |
-| DPO（可选）  | 从 SFT 样本自动构造                  | 优化表达质量、结构、少废话 | 小规模就够            |
-| GRPO（推荐） | 基于可验证 reward                  | 优化答案正确性和推理格式  | 更贴合 reason model |
-
-## 数据来源
-
-### sft 参考数据集
-
-https://huggingface.co/datasets/AdaptLLM/ConvFinQA/  
-“对话 + 数值推理”
-
-https://finqasite.github.io/ https://github.com/czyssrs/FinQA
-- **核心特点**：
-    - **专家标注**：11名美国金融专家标注，时薪$20-50
-    - **结构化推理**：每个问题附带推理程序（operation步骤）
-    - **多模态输入**：62.43%仅需表格，23.42%仅需文本，14.15%需两者结合
-- **数据规模**：8,281样本（训练6,251/验证883/测试1,147）
-- **推理复杂度**：59.1%单步推理，32.71%两步，8.19%三步+
-- **最佳用途**：评估模型**数值推理能力**、**表格理解能力**
-
-
-### benchmark 参考
-
-选择
-
-1. FinQA：测 表文混合 + 多步数值推理
-2. ConvFinQA：测 多轮上下文 + follow-up 金融推理
-3. CFLUE：推荐做，但只选和任务最相关的子任务，不要全做。
-     - 它的作用不是测“金融数值推理”，而是测：中文金融语义理解；中文金融术语/文本泛化；模型是否只会英文表格推理，而不会中文金融表达。
-     - 所以它应该作为：“中文金融泛化补充 benchmark”
-
-
-参考
-
-[BUPT-FinanceReasoning](https://huggingface.co/datasets/BUPT-Reasoning-Lab/FinanceReasoning)
-
-
-https://www.modelscope.cn/datasets/tongyi_dianjin/CFLUE
-阿里云-通义点金与苏州大学联合推出了CFLUE（Chinese Financial Language Understanding Evaluation），这是一个新颖的、全面的评估基准，旨在评估大型语言模型在中文金融语境中的理解和处理能力。
-
-CFLUE通过两个主要维度——知识评估和应用评估来衡量语言模型的性能。
-
-知识评估部分包含超过38,000个多项选择题，这些题目选自15种不同的金融资格模拟考试，旨在测试语言模型的答案预测和推理能力。每个问题都伴随有解释，有助于深入评价模型的推理过程。
-应用评估部分则提供超过16,000个实例，覆盖文本分类、机器翻译、关系抽取、阅读理解和文本生成等五种经典NLP任务，这些实例源自现有共享任务或由专业人员标注的真实数据。
-整体而言，CFLUE为了解和提升中文金融领域LLMs的能力提供了多角度的见解，并通过CFLUE呼吁对这些模型的能力进行更全面细致的评估。研究团队期望，CFLUE不仅能促进对现有模型的深入了解，还能推动中文金融领域语言模型发展的新步伐。
-
-目前，CFLUE V1.0 的评估数据集将向公众提供，未来计划不断更新版本并推出集成的平台化评估服务，旨在为整个行业提供全面的一站式评价解决方案。
-
-https://huggingface.co/datasets/PatronusAI/financebench
-- 由PatronusAI开发，专注于开放式金融问答评估
-- 特点：结合长文档理解（RAG场景），测试模型从金融报告中**提取和推理能力**
-https://finqasite.github.io/ https://github.com/czyssrs/FinQA
-- **核心特点**：
-    - **专家标注**：11名美国金融专家标注，时薪$20-50
-    - **结构化推理**：每个问题附带推理程序（operation步骤）
-    - **多模态输入**：62.43%仅需表格，23.42%仅需文本，14.15%需两者结合
-- **数据规模**：8,281样本（训练6,251/验证883/测试1,147）
-- **推理复杂度**：59.1%单步推理，32.71%两步，8.19%三步+
-- **最佳用途**：评估模型**数值推理能力**、**表格理解能力**
-
-https://huggingface.co/datasets/AdaptLLM/finance-tasks
-- This repo contains the **evaluation datasets** for our paper [Adapting Large Language Models via Reading Comprehension](https://huggingface.co/papers/2309.09530).
-
-# 数据处理
-
-## version 1
-
-数据处理文档见：[docs/fin_datasets.md](docs/fin_datasets.md)
-
-对应 `run_fingpt_min.ipynb` 第 2~5 节，完整流程为：
-
-1. 原始数据就绪（本地缓存/HF）
-2. `python -m financial_data_processors` 统一转为 SFT/DPO 格式
-3. `data/clean_sharegpt_dataset.py` 基础清洗  
-4. `data/audit_sharegpt_dirty_samples.py` 质量审计
-5. `data/filter_sharegpt_by_audit.py --mode strict` 严格过滤并落盘训练目录
-
-### 数据处理结果
-
-SFT1（FinQA）：
-- raw: `6251`
-- clean 后: `4683`（**剔除过长轮次 `1568`**）
-- strict 后: `3954`（审计标记 `729`，全部剔除）
-
-SFT2（ConvFinQA turn）：
-- raw: `2096`
-- clean 后: `1407`（**剔除过长轮次 `689`**）
-- strict 后: `1015`（审计标记 `392`，全部剔除）
-
-清洗阈值（与 notebook 一致）：
-- 对话轮次：`2~16`
-- 总字符：`<=6000`
-- 单轮字符：`<=2500`
-
-## version2: distillation
-
-[distill文档](docs/fin_distill.md)
-
-> **target：可验证的结构化 reasoning data distillation**
-
-> 1. 找一个足够强的 teacher（闭源 API 或你后续更强 checkpoint）让它在 FinQA / ConvFinQA prompt 上生成结构化推理；  
-> 2. 用答案 / program / evidence / structure 做自动验证；
-> 3. 把通过的候选变成：distilled SFT、distilled DPO、audit / verifier 数据；  
-> 4. benchmark 证明它比“非蒸馏 SFT”更好。
-
-我采用 **black-box response distillation**，将高能力 teacher 的推理轨迹迁移到 student，并通过自动打分与组内选择机制控制监督质量。受 STaR 启发，我们不直接学习所有 teacher outputs，而是先统一对候选打分，再把每组里最高分的 clean 候选写入 distilled SFT，把最低分的其余可用候选写入 distilled DPO 的 rejected 侧。这样正样本保持干净，负样本保持可比，也避免把没有可用 `chosen` 的整组噪声样本带进训练集。
-
-Stage 1：用现有 processor 构造高一致性 prompt  
-Stage 2：teacher 生成多个 reasoning 候选  
-Stage 3：统一 scoring，并按组选择 `chosen/rejected`  
-Stage 4：产出 distilled SFT / DPO / audit  
-Stage 5：再用 benchmark 验证蒸馏收益
-
-
-存在的问题：
-1. distill方案：program-conditioned-distill
-2. distill-score：程序score & llm as judges?
-3. tied dpo: chosen和rejected差别不大 应该如何构造优秀的rejected？
-
-
-**reference：**
-
-**STaR: Bootstrapping Reasoning With Reasoning（2022）**：先让模型尝试生成 reasoning；只保留那些“最终答对”的 reasoning；再用这些正确 reasoning 反过来继续训练模型。
- - teacher 生成多个候选
- - 用答案 / 程序 / 结构 / JSON 痕迹校验
- - 保留通过的候选
-蒸馏数据的价值，不在于 teacher 生成了多少，而在于 teacher 生成中有多少“正确可学”的 reasoning。
-
-
-**Distilling Reasoning Capabilities into Smaller Language Models（2022）**：未来做蒸馏时，应该更重视：program consistency;evidence grounding;answer correctness。而不是只盯着“teacher 话术好不好看”。
- - 这会让你的蒸馏更偏“任务能力”，而不是“语言风格”。
-
-**Deepseek-R**1：先用 RL / reasoning training 把 teacher 做强，再把 reasoning outputs 蒸到更小 student 上（即distill-R1）。
- - 小模型不一定非要自己学会“从零 RL 出 reasoning”；更现实的路线是：先把大模型训练成 reasoning teacher，再蒸给小模型。
-
-**重点复现：[open-r1](https://github.com/huggingface/open-r1)**
-1. synthetic reasoning data generation
-2. generate → filter → train
-3. 如何处理 reasoning traces：trace 是完整保留还是裁剪；答案和 reasoning 的拼接格式；有没有 verifier / filtering 逻辑。
-
-Tiny-Zero/EasyR1：增强教师。
-
-> 未来展望：RL 后的 teacher，能不能直接拿它输出蒸 student？RL-aware distillation。
-
-# Done: SFT
-
-## 遇到问题
-
-因为FinQA和ConvQA是数值推理数据集，尤其ConvQA涉及到了多轮对话，因此对于数据集处理要求很高，我优化数据集处理的过程主要聚焦于数据清洗过滤和推理过程生成。推理过程生成采用了脚本生成和蒸馏生成两种方式，最后经过比较蒸馏生成效果显著，证明了蒸馏的必要性。
-
-### loss spike
-
-`checkpoint-600` loss 正常下降；`checkpoint-800`出现 spike（约 `0.4 -> 4.0`）。
-
-归因：脏样本与冲突标注导致梯度异常波动。
-
-解决：启用 `clean -> audit -> strict filter` 三段清洗，训练集统一使用 `*_clean_strict.jsonl`。
-
-补充：SFT v2 还新增了数据审计要求，在训练前检查：
-- `json_like_evidence_ratio`
-- `structured_answer_ratio`
-- `avg_prompt_chars` / `avg_answer_chars`
-- 样本 preview 中是否仍残留原始 JSON 证据块
-
-## SFT v2 设计变更
-
-当前不再直接沿用旧版 joint training 结论。最新 benchmark 显示旧版 `sft_merged` 弱于 `base`，说明训练 loss 更低不等于推理效果更好。
-
-SFT v2 的核心变更是：
-- `关键证据` 不再直接监督原始 `gold_ind/gold_inds` JSON
-- `FinQA` / `ConvFinQA` 的 evidence 改为自然语言摘要 bullet
-- `ConvFinQA` 历史问题先压缩，再进入 prompt
-- 修改 processor 后，必须重新生成 `*_clean_strict.jsonl` 再启动训练
-
-# Done：DPO（轻量）
-
-对应 `run_fingpt_min.ipynb` 第 8 节：
-
-- DPO 数据构造：按来源占比采样，总预算 `DPO_TOTAL_BUDGET=4000`，单数据集上限 `MAX_DPO_PER_DATASET=2000`
-- 训练参数：`learning_rate=5e-7`，`max_steps=200`，`batch_size=1`，`grad_accum=16`
-- LoRA：`rank=8, alpha=16, dropout=0.05`
-
-训练日志（notebook 记录）：
-- `train_loss=0.3516`
-- `train_samples=3840`
-
-质量控制：
-- 训练前会统计规模、去重、结构锚点覆盖（如“最终答案：/推理程序：”）
-- notebook 中已加入对异常 `jsonl`（字面量 `\n`）的兜底解析逻辑，避免误判空数据
-
-# fix：评估
-
-**如何判断 SFT + DPO 是否有效。**
-- 最重要的不是“模型看起来更会说了没有”，而是任务能力有没有真正提升。
-- 现在的核心任务不是泛金融聊天，而是金融数值推理，所以最关键的指标应该始终围绕“答得对不对”。
-    - 例如在 FinQA / ConvFinQA 的验证集上，你可以统计数值答案正确率、关键字段是否抽取正确、是否能在多轮对话中保持上下文一致。
-    - 如果 SFT 后这些指标有提升，说明模型至少学会了任务；
-    - 如果在此基础上做 DPO 后，这些指标继续提升，那 DPO 就是有效的；
-    - 但如果 DPO 之后模型只是回答得更长、更像人，却没有让正确率继续变高，甚至反而下降，那就说明 DPO 主要改善了“输出表现”，并没有真正增强核心能力。
- - 换句话说，DPO 是否成功，不能只看回答是否更顺眼，而要看它有没有在不伤害任务正确率的前提下，让输出更稳定、更少幻觉、更符合你想要的结构化风格。
-
-双维度评估：一方面看“任务结果”，另一方面看“输出质量”。
-- 前者包括正确率、数值误差、对话连续性；后者包括回答是否更少跑题、是否更少胡编、是否更稳定地按照“步骤 + 结论”或者“推理 + 最终答案”的形式输出。
-
-# fix：GRPO（reward 设计）
-
-> SFT 让模型“会做”，DPO 让模型“做得更像一个专业助手”，GRPO 让模型“更容易做对”。
-
-**如何判断 SFT + DPO 之后还要不要继续做 GRPO。**
-
-本质上是在判断：问题到底还停留在“表达和行为层面”，还是已经进入了“能力和正确率层面”。
-- 如果你做完 SFT + DPO 后，发现模型已经很像一个金融助手了，回答也更规整、更像样，但在真正的数值推理题上还是经常算错、漏条件、找错表格字段、或者多轮追问时前后不一致，那么这就说明：模型已经学会“怎么回答”，但还没有学会“怎么稳定地答对”。在这种情况下，继续做 DPO 的收益通常就开始下降了，因为 DPO 更擅长优化“偏好”和“表现”，不擅长解决“为什么它还是会算错”这种问题。也就是说，当你发现模型“会说了，但还不会稳定做对”，这就是非常明确的信号：该考虑 GRPO 了。
-- 如果你做完 SFT + DPO 之后，模型在验证集上的正确率已经足够高，输出也足够稳定，数值题和 follow-up 问题都能比较稳地处理，那就不一定非要上 GRPO。
-    - 因为 GRPO 不是“所有项目都必须补上的最后一步”，它只有在模型还存在明显“能力上限”问题时才特别有价值。很多项目其实做到 SFT + 轻量 DPO 就已经够用了，尤其如果你的目标是做一个能展示方法论和工程闭环的项目，而不是拼 benchmark 极限成绩。
-
-> 但你这个项目的特殊之处在于：它是一个可验证的数值推理任务。这意味着一旦你发现“正确率”而不是“风格”成为主要瓶颈，GRPO 的价值就会非常高，因为它恰好最适合解决这种“有明确对错标准”的问题。
-
-**GRPO 到底有什么用：不是让模型“更像人”，而是让模型为了答对而优化。**
-- SFT 本质上是在做模仿学习：给模型看很多“输入—输出”对，让它学会“看到这种问题时应该长什么样地回答”。
-- DPO 则是在模仿学习之上进一步引入偏好信号，让模型学会“哪种回答更好、更像人、更符合期望”。但无论是 SFT 还是 DPO，它们本质上都还停留在“学会模仿好的答案”这个层面。
-- GRPO 的不同在于，它不是在教模型“像谁”，而是在教模型“为了得高分应该怎么做”。如果你的 reward 是“答案正确 + 推理结构完整 + 格式符合要求”，那模型就不再只是学会背出训练集里的模式，而是会逐渐朝着更容易答对的方向去调整自己的策略。
-
-> 这也是为什么 GRPO 对你这个项目特别合适。因为你做的是金融数值推理，这类任务最大的优点就是：reward 很容易设计，而且可以自动验证。
+3. **从单轮 FinQA 到多轮 ConvFinQA program supervision**
+   - 当前 SFT2 使用 ConvFinQA turn-level。
+   - 同时加入 FinQA replay 防止单轮表文能力遗忘。
+   - 这是 Fino1-style generalized financial reasoning 数据不一定覆盖得很细的地方。
 
 ---
 
-1. 为什么做 GRPO
-    - DPO更偏“偏好排序/表达风格”，GRPO更适合“可验证目标优化”（答案正确、程序一致、格式约束）。
-2. 何时做 GRPO
-    - 当你已经**有不错的 SFT 基线**，但「答案正确率/程序一致性/格式约束」仍可提升；
-    - 且你能构建**可验证 reward**（格式、程序、答案）。
-3. 如何做 GRPO
-    - SFT -> DPO -> GRPO 只在 DPO 数据修复并验证收益稳定后再尝试。
-4. 如何对比有无 GRPO：
-    - 固定同一 base checkpoint，做 A/B：
-        - A: baseline（SFT 或 SFT+DPO）
-        - B: baseline + GRPO
-    - 保持同数据切分、解码参数、评测脚本一致。
-    - 至少 3 seeds，报告均值/标准差，并做显著性检验。
+**Stage 0: Base model**
+Qwen2.5-7B-Instruct
+
+**Stage 1: CoT cold-start**
+Fino1_Reasoning_Path_FinQA 为主，FinCoT 低比例
+目标：学金融 reasoning 表达，不强行生成 Program
+
+**Stage 2: FinQA Program SFT**
+Evidence + Reasoning + Program + Answer + Normalized Answer
+目标：把 CoT 意图落到 gold Program
+
+**Stage 3: ConvFinQA Program SFT + FinQA replay**
+ConvFinQA turn-level : FinQA replay 约 2:1 或 3:1
+目标：多轮推理，同时不忘单轮表文能力
+
+**Stage 4: Verification benchmark**
+看 program parse、execution rate、executed answer accuracy、model normalized answer accuracy、pass@k
+
+**Stage 5: GRPO**
+主 reward = execute(Program) == gold answer_norm
+辅助 reward = format、operator consistency、evidence grounding、scale consistency、brevity
+
+1. Fino1 先提供金融 CoT 语义骨架
+模型先学会“为什么用这个指标、为什么这样算”。
+
+2. Program SFT 再校准计算结构
+FinQA/ConvFinQA 的 gold Program 会把模型从“会说理”拉回“会执行”。
+
+3. RL reward 更不稀疏
+如果模型已经能生成合理 Program，GRPO 的 execution reward 才更容易起作用。
+
+4. 比直接在 sft2_dual_merged 后混 Fino1 更少冲突
+后混 CoT 数据容易让模型输出变长、Program 稳定性下降，尤其 FinCoT 不是 gold Program 数据。
+
+---
+
+主任务: FinQA/ConvFinQA 的可验证 Program reasoning
+FinQA/ConvFinQA verifiable program reasoning
+
+ - 面向金融表文数值推理的可验证 CoT+PoT reasoning：以 FinQA/ConvFinQA gold Program 为核心监督，让模型从金融文本、表格和多轮上下文中定位证据，生成可执行 Program，并通过 executor 得到可验证答案。
+
+辅助任务:
+Fino1/FinCoT financial CoT reasoning supplement
+
+扩展任务:
+TATQA / DocFinQA / BizBench / Econ-Logic 泛金融推理泛化
+
+最终能力描述:
+verifiable financial numerical reasoning, not generic financial QA
+
+金融文本理解；表格定位；数值推理；单位归一；公式选择；多轮 follow-up；程序生成；答案验证
+
+---
+
+泛金融问答不适合作为当前主任务，原因有几个。
+
+第一，项目差异化：Program 和 executor。
+泛金融问答已经有很多模型、数据和 benchmark 可以做，但仓库现在真正独特的是 FinQA/ConvFinQA 的 gold Program、Normalized Answer、program execution、pass@k、GRPO reward。这条线是可验证的，能清楚判断模型有没有变强。
+
+第二，泛金融问答太宽，reward 会变虚。
+如果主任务定义成泛金融问答，问题会混进财报理解、投资常识、经济逻辑、政策解释、开放式分析、长文档 QA 等。很多答案没有唯一可执行标准，RL reward 只能退化成格式分、LLM judge 或 answer string match，训练信号会弱很多。
+
+第三，FinQA/ConvFinQA 更适合做 SFT -> RL 的闭环。
+
+泛金融数据可以作为辅助，不该抢主线。
+FinCoT、TATQA、DocFinQA、BizBench、Econ-Logic 这些可以作为 supplement，用来增强语言表达、长上下文和领域广度。但它们最好服务于主任务，而不是把主任务改掉。
+
+---
+
+## Abstract
+
+本项目面向金融表文数值推理，目标是在 Fino1-style 金融 reasoning SFT + GRPO 范式上，引入 FinQA/ConvFinQA 的可验证 Program supervision，将 CoT-only 金融推理扩展为 Evidence-grounded CoT/PoT 程序监督框架。金融数值推理不应只依赖自然语言 Chain-of-Thought。CoT 能解释证据选择和公式意图，但它本身不可执行，也难以稳定验证；FinQA 和 ConvFinQA 则提供 gold Program、execution answer 与 normalized answer，因此更适合构建可执行、可评估、可用于 reinforcement learning reward 的 Program-of-Thought。
+
+本仓库的当前重点不是简单复现 Fino1，也不是直接微调 Fino1 checkpoint，而是采用 Fino1/FinCoT 代表的 reasoning SFT + GRPO 思路，并将核心监督从自然语言 reasoning path 扩展到 FinQA/ConvFinQA 的 gold Program supervision。换言之，Fino1-style CoT 训练提供金融推理表达能力，本项目进一步用 `Program:` 和 executor 将推理落到可验证的数值计算上。
+
+## 1. Motivation
+
+金融表文数值推理通常同时包含证据定位、指标理解、单位归一、公式选择和数值计算。
+
+自然语言 CoT 适合解释“为什么选这些数”和“为什么这样算”，例如说明一个问题要求 percentage change，因此需要取当前值和上一期值，先做差，再除以上一期值。但 CoT 的弱点同样明显：它可以写得流畅却算错，可以遗漏单位转换，也难以直接作为 reward 的可靠依据。
+
+PoT，即 Program of Thought，更适合作为金融数值题的计算层。在本项目中，`Program:` 就是第一版 PoT。它把推理中的计算结构写成可解析的 DSL，例如 `divide(subtract(6823, 6161), 6161)`。这类表示比自由文本更低歧义，可以由 executor 执行，并与 `Normalized Answer` 做数值容差比较。PoT 不替代 CoT，而是承担 CoT 不擅长的可执行计算部分。
+
+因此，本项目将金融推理拆成三个互补层次：`Evidence` 负责 grounding，`Reasoning` 负责解释变量选择和公式意图，`Program` 负责可执行计算。当前 v2 主线训练 `Evidence + Program + Answer + Normalized Answer`，保留模型直接生成可读答案和标准答案的能力；v3 主线进一步收敛到 `Evidence + Program`，最终答案由 executor 计算。这种 v3 形式是最干净的 program-executed reasoning：模型不再被要求心算高精度小数，而是被训练成金融表文数值推理编译器。
+
+## 2. Current Framework
+
+当前仓库保留 MedicalGPT 原有训练与服务能力，同时在金融推理方向形成了独立的实验主链。根目录中的 notebook 是实验编排入口，主要包括 `run_fingpt_v2.ipynb`、`run_fingpt_v3.ipynb` 和 `run_fingpt_v2_rl.ipynb`。其中 v2 notebook 对应 dual-answer baseline，v3 notebook 对应 program-executed reasoning，v2 RL notebook 用于承接已训练好的 SFT checkpoint 设计 GRPO 实验。
+
+`financial_data_processors/` 是金融数据主链的核心模块。统一入口为 `python -m financial_data_processors`，负责将 FinQA、ConvFinQA turn-level 等数据族解析、规范化、审计并转换为 SFT/DPO 所需格式。当前 FinQA/ConvFinQA 主链使用 strict-A 过滤，清除 prompt-label 冲突样本，规范化 Program 中的数据集内部常量，并保留 `answer_display`、`answer_norm`、`program_canonical`、`answer_unit`、`answer_scale` 等 metadata。这个模块使金融数据处理从 notebook 临时代码变成可复用的数据路由层。
+
+`training/` 承接 SFT、DPO、GRPO、PPO、ORPO、reward modeling 等训练实现。金融主线目前复用 `training/supervised_finetuning.py` 的截断与训练逻辑，不为了 FinQA/ConvFinQA 额外修改底层 SFT trainer；金融任务特有的 prompt、target、metadata 和 audit 逻辑集中在 processor 与 notebook 中。这样的划分让训练框架保持通用，而领域约束留在数据层。
+
+`evaluation/` 负责评估，尤其是 `evaluation/evaluate_financial_benchmarks.py`。该脚本支持 FinQA/ConvFinQA generation benchmark、Program 解析、Program execution、normalized answer 对比以及 pass@k 评估。项目不只看训练 loss，而是以生成式 benchmark 判断真实能力，因为金融数值推理的关键错误往往发生在取数、单位、公式和输出格式上，而不一定能从 loss 直接看出。
+
+`docs/` 保存稳定的数据规范和实验说明，尤其是 `docs/fin_datasets_v2.md` 与 `docs/fin_datasets_v3.md`。v2 文档定义 dual-answer baseline，v3 文档定义 program-executor 主线。`ref/` 保存 Fino1、FinCoT、Program of Thoughts、ETD、Fin-R1、DianJin-R1、FinanceReasoning 和 difficulty-aware training 等研究参考，用于解释本项目相对于金融 reasoning 后训练工作的定位。
+
+## 3. Data and Training Pipeline
+
+
+参考数据集
+
+| 数据集 | 规模/字段 | 来源 | 价值 | 主要风险 |
+|---|---:|---|---|---|
+| `czyssrs/FinQA` | | |
+| `AdaptLLM/ConvFinQA/` | | |
+| `TheFinAI/Fino1_Reasoning_Path_FinQA` | `train` 约 5.5k rows；字段是 `Open-ended Verifiable Question`、`Ground-True Answer`、`Complex_CoT`、`Response` | 明确来自 **FinQA**，用 GPT-4o 给 FinQA 问答生成 reasoning path | 和现在 FinQA/Program 主链最贴近，容易对齐 gold Program、answer_norm、execution benchmark | 只覆盖 FinQA，数据多样性较窄 |
+| `TheFinAI/FinCoT` | 约 9.19k rows；`SFT` 约 7.69k，`RL` 约 1.5k；字段是 `Question`、`Reasoning_process`、`Final_response`、`Negative_reasoning_process`、`Negative_response` | 混合 FinQA、ConvFinQA、TATQA、DocMath-Eval、Econ-Logic、BizBench-QA、DocFinQA 等 | 金融 reasoning 多样性更强，也有 SFT/RL 风格字段 | 分布更杂、上下文可能极长、格式和 Program DSL 主链不完全一致，且部分源数据如 Econ-Logic 有非商业限制 |
+
+---
+
+**Fino1_Reasoning_Path_FinQA 为主，FinCoT 低比例**
+
+`Fino1_Reasoning_Path_FinQA` 本身来自 FinQA，所以它的问题形式、上下文结构、数值答案风格都更接近现在的 FinQA strict-A、v2/v3 Program SFT 数据。它适合做 cold-start：先教模型用自然语言解释“为什么这样算”。
+
+本地 FinQA 有 gold `Program`、`answer_norm`、executor。Fino1 的 CoT 虽然没有 Program，但因为它源于 FinQA，后续可以更容易映射到本地 FinQA 样本，形成：
+```text
+Evidence:
+Reasoning:  来自 Fino1 / teacher CoT
+Program:    来自本地 FinQA gold program
+Answer:
+Normalized Answer:
+```
+比用 FinCoT 混合数据安全得多。FinCoT 里很多样本来自 TATQA、DocMath、BizBench、DocFinQA、Econ-Logic 等，不一定有当前 executor 可执行的 DSL Program。
+
+FinCoT 好处是覆盖面广，可以让模型接触更丰富的金融推理表达。但它也会把任务分布拉散：有长文档、多文档、经济逻辑、业务问答、不同答案格式。对现在这种强依赖 `Evidence + Program + Answer + Normalized Answer` 的 pipeline 来说，比例太高会让模型更像泛金融 CoT 模型，而不是稳定的 Program compiler。
+**FinCoT 更适合作为 robustness / style supplement**。它可以补一些 Fino1 没有的金融场景，但最好不要让它主导训练目标。尤其正式进入 Program SFT 和 GRPO 前，主干必须仍然是 FinQA/ConvFinQA gold Program，否则 execution reward 会变稀疏，甚至 reward profile 不一致。
+
+```text
+CoT cold-start:
+  Fino1_Reasoning_Path_FinQA: 70% - 90%
+  FinCoT SFT:                 10% - 30%
+
+Program SFT:
+  本地 FinQA/ConvFinQA gold Program: 主体
+  Fino1/FinCoT: 只作为低比例 Reasoning supplement，不能覆盖 gold Program
+
+GRPO:
+  FinQA/ConvFinQA program_numeric 样本为主
+  FinCoT 只用于 cot_answer_only 或暂时不进 execution reward
+```
+
+> 可以调整比例跑ablation看数据集比例带来的影响。
+
+---
+
+当前最重要的完成结果是 `sft2_dual_merged`。它不是普通的单阶段 SFT checkpoint，而是 FinQA/ConvFinQA 程序监督金融数值推理主线的 v2 baseline。SFT-1 使用 FinQA strict-A 训练单轮金融表文数值推理，让模型学习从 report context、table 和 question 中定位证据、生成 Program，并输出可读答案与标准化答案。SFT-2 使用 ConvFinQA turn-level strict-A 训练多轮 follow-up reasoning，同时加入 FinQA replay 保持单轮表文能力，默认混合比例约为 `ConvFinQA:FinQA = 2:1`。
+
+FinQA 和 ConvFinQA 在本项目中的角色不同。FinQA 更适合作为单轮表文数值推理基础能力，重点是表格、文本、公式和单位的对齐；ConvFinQA 则引入 conversation history，要求模型理解当前问题与历史 turn 的关系。SFT-2 使用 turn-level 数据，而不是把 final program 复制到每一个 turn，这避免了多轮监督中的标签错配。ConvFinQA 的 history 放在 prompt 后部；当 prompt 过长时，数据处理策略优先保留当前 question 和 output rule，而不是保留全部 history。
+
+v2 target 训练模型同时生成证据、程序、可读答案和标准答案。它适合构建一个完整回答型 baseline，也适合诊断模型是否能稳定输出 `Normalized Answer`。v3 target 则去掉模型生成答案的负担，只监督 evidence selection 和 Program generation，最终答案由 executor 执行 Program 得到。
+
+```text
+v2 dual_answer_sft:
+Evidence:
+- ...
+
+Program: divide(subtract(6823, 6161), 6161)
+
+Answer: 10.745%
+
+Normalized Answer: 0.10745
+
+v3 program_executor_sft:
+Evidence:
+- ...
+
+Program: divide(subtract(6823, 6161), 6161)
+```
+
+这两条路线并行存在。v2 保留模型直接生成答案的能力，是当前 `sft2_dual_merged` 的主要基线；v3 将任务定义得更接近可验证 PoT，即模型生成可执行程序，系统负责执行、归一化和展示答案。这样的设计也为后续 GRPO 提供了更可靠的 reward 入口，因为 `execute(Program) == gold answer_norm` 比“自然语言 reasoning 看起来合理”更容易自动判定。
+
+当前数据产物继续沿用清晰的版本化目录。v2 数据位于 `/root/autodl-tmp/data/financial_reasoning_v2`，v3 数据位于 `/root/autodl-tmp/data/financial_reasoning_v3`。v2 核心文件包括 `train_sft1_dual_strict.jsonl`、`train_sft2_convfinqa_turn_dual_strict.jsonl`、`train_sft2_dual_balanced.jsonl` 与 `valid_dual_balanced.jsonl`；v3 对应文件为 `train_sft1_program_strict.jsonl`、`train_sft2_convfinqa_turn_program_strict.jsonl`、`train_sft2_program_balanced.jsonl` 与 `valid_program_balanced.jsonl`。详细字段、审计口径和重建命令见 `docs/fin_datasets_v2.md` 与 `docs/fin_datasets_v3.md`。
+
+## 4. Evaluation
+
+本项目的评估口径强调 generation benchmark，而不是只看训练 loss。金融表文数值推理的模型可能在 loss 上继续下降，却在真实生成时出现单位混淆、Program 不可执行、答案字段缺失或 history-dependent 问题退化。因此 benchmark 同时报告 answer accuracy、program accuracy、program execution rate、executed answer accuracy、model normalized answer accuracy、numeric parse rate、structured response coverage、average prediction length，以及 `pass@1`、`pass@4`、`pass@8`。
+
+v2 和 v3 的主指标需要区分。v2 的 `dual_answer_sft` 应同时关注 `model_normalized_answer_accuracy` 与 Program 相关指标，因为模型本身负责输出 `Normalized Answer`。v3 的 `program_executor_sft` 则以 `executed_answer_accuracy` 为核心，因为标准答案来自 executor。评估脚本目前已经支持 program execution 口径，因此比较 v2/v3 时必须明确当前看的是模型直接答案能力，还是 Program 执行后的答案能力。
+
+已有 quick benchmark 显示，`sft2_dual_merged` 是当前 v2 主 baseline。它相较 base 与 SFT1 更稳定地同时提升答案和程序指标；DPO 没有明显超过 SFT2，说明偏好学习或格式层面的空间并不是下一阶段的主要增益来源。更合理的下一步是 program-verifiable GRPO：利用 pass@k 中已经存在的正确候选，把正确 Program 从 sampled candidates 推向 greedy/high-probability 输出。
+
+pass@k 在本项目中不仅是评估指标，也是训练策略信号。如果 `pass@8` 明显高于 `pass@1`，说明模型的采样空间中已有正确程序，但概率不够高，适合用 GRPO 或 verifier-guided optimization 提升稳定性。如果 `pass@1` 与 `pass@8` 都低，则说明模型基础能力不足，应回到 SFT 或数据质量；如果二者都高且差距很小，则继续 RL 的提升空间有限。
+
+## 5. Future Improvements
+
+下一阶段的第一条提升路线是引入公开 Fino1/FinCoT 数据作为外部 CoT supplement。`TheFinAI/Fino1_Reasoning_Path_FinQA` 与 FinQA 风格更接近，适合补充 FinQA-style reasoning path；`TheFinAI/FinCoT` 覆盖更广金融 reasoning，可作为低比例外部数据。它们的定位是补充 CoT，而不是替代 FinQA/ConvFinQA gold Program。初始混合比例应保守，例如 core program data 90%，Fino1/FinCoT 10%，并通过 benchmark 检查 ConvFinQA 是否遗忘、program accuracy 是否下降、average output length 是否膨胀。
+
+第二条提升路线是新增 `Reasoning:` 字段，形成 CoT+PoT 或 ETD 风格的训练分支。核心样本可以从当前 FinQA/ConvFinQA normalized records 生成，结构为 `Evidence + Reasoning + Program + Answer + Normalized Answer`。其中 `Reasoning:` 应保持短，解释证据选择和公式意图，而不是训练长篇 `<think>`。这一路线的目标不是让模型写更多文本，而是让 `Program:` 获得更好的语义支撑，减少“程序可执行但证据错配”的问题。
+
+第三条提升路线是 program-verifiable GRPO。GRPO 不应继续重奖已经学会的格式，而应把主 reward 放在 `execute(Program) == gold answer_norm` 上，并辅以 strict Program parse、operator consistency、evidence number grounding、brevity 和 percent/ratio scale consistency。RL 数据不应随机抽取普通 SFT 样本，而应通过 pass@k mining 选择 hard-but-verifiable 样本，例如当前模型 `pass_rate` 位于中等区间、答案短、Program 可执行、自动判分可靠的 FinQA/ConvFinQA 样本。
+
+更长远地，项目可以从 DSL Program 扩展到 Python Program，但应先保证安全执行器和 strict DSL executor 稳定。Python-level PoT 可以提升与 Program-of-Thoughts 和 FinanceReasoning 的兼容性，但也引入安全执行、硬编码答案和代码风格不稳定等风险。因此第一阶段应优先把现有 DSL Program 的 execution reward 做准，再逐步引入 DSL-to-Python、AST whitelist executor 和 self-consistency voting。
+
+## 6. Relation to Fino1 and Prior Work
+
+本项目可以被理解为 Fino1-style baseline 的方法论改进，而不是官方 Fino1 的复现。Fino1/FinCoT 代表了金融 reasoning SFT + GRPO 的重要方向：用金融 reasoning path 注入推理能力，再通过 reinforcement learning 提升复杂金融任务表现。本项目采用这一后训练范式，但将核心监督从 CoT reasoning path 扩展到 FinQA/ConvFinQA gold Program supervision，并引入 execution-based evaluation and reward。
+
+这种定位也解释了为什么不能直接把 FinCoT 当作主训练集。FinCoT 的 `Reasoning_process` 能帮助模型学习金融推理表达，但它不是 FinQA/ConvFinQA 的 gold Program。对于本项目，外部 CoT 是补充层，FinQA/ConvFinQA Program 是主干层。无法对齐 gold Program 的外部样本可以标记为 `Program: N/A`，用于 answer/format/reasoning supervision，但不应参与 Program execution reward。
+
+Program-of-Thoughts 提供了“模型生成程序，解释器负责计算”的核心思想，FINDER 进一步说明金融场景中 evidence retrieval 和 dynamic example selection 的价值。ETD 强调 CoT、PoT、EoT 的组合蒸馏，提示我们不应只蒸馏长 CoT，而应让自然语言 reasoning、可执行 Program 和 execution check 互相校验。Fin-R1 和 DianJin-R1 则说明金融领域 SFT + GRPO 是有效范式，但它们更偏 CoT/format/answer reward；本项目的差异在于使用 FinQA/ConvFinQA 原生 Program，把 reward 绑定到可执行数值推理。
+
+FinanceReasoning 与 difficulty-aware training 为后续扩展提供了两个方向。前者提供带 Python solution 的更严格金融数值 benchmark，适合作为外部 PoT 评测与难度分层分析；后者强调 high-quality SFT data 与 hard-but-verifiable RL data 的价值，和本项目的 pass@k mining、execution reward 路线一致。
+
+## References
+
+Fino1-style reasoning data and training are the main external baseline for future comparison. See Fino1 at https://github.com/The-FinAI/Fino1, FinCoT at https://huggingface.co/datasets/TheFinAI/FinCoT, and Fino1 Reasoning Path FinQA at https://huggingface.co/datasets/TheFinAI/Fino1_Reasoning_Path_FinQA.
+
+Program-supervised and execution-based reasoning are documented in `ref/program_of_thoughts_chen2023_research.md`, `ref/etd_cot_pot_eot_distillation_research.md`, and `ref/fino1_fincot_integration_research.md`. These notes motivate the distinction between CoT, PoT and EoT, and explain why FinQA/ConvFinQA gold Program should remain the core supervision signal.
+
+Financial reasoning post-training and related baselines are summarized in `ref/fin-r1.md`, `ref/dianjin-r1.md`, and `ref/financereasoning.md`. Difficulty-aware and data-centric training considerations are summarized in `ref/cao_data_value_difficulty_aware_training.md`.
+
+Detailed local data specifications are maintained separately in `docs/fin_datasets_v2.md` and `docs/fin_datasets_v3.md`. The v2 document describes the current dual-answer baseline, while the v3 document describes the program-executed reasoning path.
+
+---

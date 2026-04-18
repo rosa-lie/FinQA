@@ -1,5 +1,12 @@
 # Fino1、FinCoT 与 Fino1 Reasoning Path 数据接入调研
 
+https://huggingface.co/datasets/TheFinAI/FinCoT
+
+https://huggingface.co/datasets/TheFinAI/Fino1_Reasoning_Path_FinQA
+
+https://github.com/The-FinAI/Fino1
+
+
 ## 1. 背景与定位
 
 Fino1 是金融 reasoning-enhanced LLM 方向的近作，重点研究通用 reasoning 能力和 reinforcement learning 能否迁移到金融领域。它的路线可以概括为：构造高质量金融 reasoning path 数据，先做 SFT，再使用 GRPO 做强化学习优化。

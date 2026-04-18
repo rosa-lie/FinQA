@@ -1,5 +1,315 @@
 # Program of Thought、FinQA 与可验证蒸馏总调研
 
+## 对比总结
+
+严格说，`ref/` 里的项目不是都“直接用 FinQA/ConvFinQA 训练模型”。可以分成三类：
+
+1. **prompting / inference 框架**：PoT、FINDER，主要在 FinQA/ConvFinQA 上做推理评测，不训练或不以训练为核心。
+2. **reasoning SFT + RL 框架**：Fino1、Fin-R1、DianJin-R1，把 FinQA/ConvFinQA 或 FinQA-style 数据作为金融 reasoning 数据的一部分，做 SFT 后再 GRPO/RL。
+3. **数据/蒸馏/难度感知框架**：ETD、Cao data-centric、FinanceReasoning，核心是构造更高质量、更可验证、更难的训练/评测数据。
+
+
+`ref/` 里其他项目在 FinQA/ConvFinQA 上大致有两种做法：
+
+```text
+PoT/FINDER:
+  不主要训练，而是在 FinQA/ConvFinQA 上用检索 + few-shot/dynamic examples + program execution 做推理。
+
+Fino1/Fin-R1/DianJin:
+  用 FinQA/ConvFinQA 或 FinQA-style 数据生成/蒸馏 CoT，筛选后 SFT，再用 GRPO 的 format + accuracy reward 优化。
+```
+
+但对我们当前项目，最优迁移不是照搬长 CoT，而是：
+
+```text
+FinQA/ConvFinQA gold program
+-> strict Program SFT
+-> optional short CoT / ETD
+-> execution-filtered samples
+-> hard-but-verifiable GRPO
+```
+
+也就是：**用别人的 CoT/R1 框架做外层训练策略参考，用我们自己的 gold Program 做核心监督和 reward。**
+
+
+**对照表**
+
+| 项目 | FinQA / ConvFinQA 怎么用 | 训练方式 | 输出格式 / 推理形态 | 对我们的启发 |
+|---|---|---|---|---|
+| **Program-of-Thoughts, Chen 2023** | 在 FinQA、ConvFinQA 上做 PoT prompting 评测 | 主要不是训练，而是 few-shot prompting | 让模型生成 Python program，解释器执行得到答案 | 证明金融数值题适合“模型写程序，系统算答案” |
+| **FINDER, Khatuya 2025** | 在 FinQA、ConvFinQA 上做金融 PoT SOTA | 主要是 inference pipeline，不是 student 训练 | 检索 evidence + 动态选择示例 + context-aware PoT | 可以把 FINDER 当 teacher data generator，而不是直接当训练框架 |
+| **Fino1 / FinCoT** | FinQA reasoning path、FinCoT 数据作为金融 reasoning SFT/RL 数据 | SFT 注入 reasoning path，再 GRPO | 偏 CoT reasoning path，含答案；不是天然 gold program | 可低比例补 CoT，但不能覆盖本地 gold Program 主链 |
+| **Fin-R1** | Fin-R1-Data 覆盖 FinQA、ConvFinQA 等金融任务 | DeepSeek-R1 蒸馏金融 CoT，筛选后 SFT，再 GRPO | 长 CoT + final answer，reward 以 format + accuracy 为主 | 借鉴“答案筛选 + 推理筛选 + hard samples for RL”，但我们应优先 rule/program verifier |
+| **DianJin-R1** | 公开数据包含 FinQA；ref 中未看到 ConvFinQA 作为核心训练项 | DeepSeek-R1 生成 CoT，GPT-4o/rule 校验，SFT 后 GRPO | `<think>...</think><answer>...</answer>` | 可参考双 reward，但不建议把 MedicalGPT 改成 `<think>` 长 CoT |
+| **ETD / reasoning distillation** | 建议对 FinQA/ConvFinQA 用 gold program 构造 CoT+PoT+EoT | distillation SFT，后接 GRPO | `Evidence + Reasoning + Program + Python Program + Execution Check + Answer` | 最贴合我们：用 gold DSL Program 变成可执行 PoT，再做可验证 RL |
+| **Cao data-centric / ODA-Fin** | 不是专门 FinQA/ConvFinQA 项目，但方法适用 | 高质量 SFT 数据 + hard-but-verifiable RL 数据 | CoT 数据经验证筛选；RL 选中等难度可判分样本 | 用 pass-rate mining 选 FinQA/ConvFinQA RL 数据 |
+| **FinanceReasoning** | 不是直接训练 FinQA/ConvFinQA，而是外部金融数值 benchmark/data | 可作为 PoT SFT/RL 数据，但应先做 benchmark | 带 `python_solution`，天然适合 execution eval | 先做外部 benchmark，再考虑训练混入 |
+
+### **1. Program-of-Thoughts / PoT**
+
+它在 FinQA/ConvFinQA 上的核心不是训练，而是：
+
+```text
+question + table/text/history
+-> LLM generates Python program
+-> safe_execute(program)
+-> ans
+-> compare with gold answer
+```
+
+再加 self-consistency：
+
+```text
+sample k programs
+-> execute all valid programs
+-> vote over executable answers
+```
+
+这和我们 v3 的方向非常接近：模型不应该承担最终小数计算，应该承担“生成可执行 Program”。区别是 PoT 官方多是 Python program prompting，而我们当前已有 FinQA/ConvFinQA gold DSL program，可以更稳定地做 SFT。
+
+参考：[program_of_thoughts_chen2023_research.md](/root/MedicalGPT/ref/program_of_thoughts_chen2023_research.md)
+
+### **2. FINDER**
+
+FINDER 也是在 FinQA/ConvFinQA 上做，但它更像**推理系统**：
+
+```text
+financial report / conversation
+-> generative retriever 抽相关 facts
+-> dynamic example selector 选相似示例
+-> context-aware PoT prompt
+-> LLM generates executable program
+-> executor 得到答案
+```
+
+它的重点不是“直接训练 FinQA/ConvFinQA”，而是解决两个痛点：
+
+- 表文太长，模型**找不到正确 evidence**。
+- 固定 few-shot 示例不适合所有问题，需要动态选例。
+
+对我们来说，FINDER 更适合做 **teacher generation / distillation source**：
+
+```text
+FINDER-style prompt
+-> teacher 生成 Python Program
+-> 执行过滤
+-> 变成 ETD SFT 样本
+```
+
+参考：[Program of Thoughts for Financial Reasoning.md](/root/MedicalGPT/ref/Program%20of%20Thoughts%20for%20Financial%20Reasoning.md)
+
+### **3. Fino1**
+
+Fino1 的路线是：
+
+```text
+financial reasoning path data
+-> SFT
+-> GRPO
+-> financial benchmark
+```
+
+它和我们最大的区别是：Fino1/FinCoT 更偏 **CoT reasoning path**，而不是 FinQA/ConvFinQA 里的 gold executable program。
+
+`ref/` 里建议的接法是：
+
+```text
+core_program_sft:
+  FinQA + ConvFinQA gold program supervision
+
+external_reasoning_sft:
+  Fino1_Reasoning_Path_FinQA + FinCoT SFT split
+
+verifiable_rl:
+  FinQA + ConvFinQA + FinCoT RL split
+```
+
+也就是说，Fino1 可以补充金融 CoT 表达，但不应该替换我们的 program 主链。尤其外部样本如果不能和本地 FinQA id 对齐，就不要伪造 `Program`，应写 `Program: N/A` 或只当 CoT-only 样本。
+
+---
+
+ - CoT 解决“为什么这样算”
+ - PoT 解决“怎么算才可验证”
+ - `sft2_dual_merged` 已经解决了 FinQA/ConvFinQA 的基础 program-supervised 能力
+ - Fino1/FinCoT 可以补 reasoning style，但不应取代现有 Program 主链
+
+sft2_dual_merged -> 低比例混入 Fino1/FinCoT 做 reasoning SFT -> 用 Program / execution reward 做 GRPO
+
+
+启发：financial numerical reasoning with verifiable program supervision
+
+Fino1/FinCoT 提供 CoT，不提供可靠 PoT（`Reasoning + Answer`）；FinQA/ConvFinQA 继续提供 gold Program/PoT（`Evidence + Program + Answer + Normalized Answer`）。
+
+当前框架保留 FinQA/ConvFinQA strict-A program 主链，同时新增一条 Fino1-style 外部 reasoning path 支线：
+```text
+Core:
+FinQA / ConvFinQA gold Program
+-> Evidence + Program / Answer / Normalized Answer
+-> sft2_dual_merged baseline
+
+External:
+Fino1_Reasoning_Path_FinQA + FinCoT
+-> Reasoning + Answer supervision
+-> low-ratio mixed SFT
+-> optional GRPO with verifiable reward
+```
+
+
+---
+
+参考：[fino1_fincot_integration_research.md](/root/MedicalGPT/ref/fino1_fincot_integration_research.md)
+
+### **4. Fin-R1**
+
+Fin-R1 是典型金融 R1 路线：
+
+```text
+raw financial datasets
+-> DeepSeek-R1 distillation
+-> answer scoring
+-> reasoning scoring
+-> good samples for SFT
+-> bad/hard samples for RL
+-> Qwen2.5-7B-Instruct SFT
+-> GRPO with format reward + accuracy reward
+```
+
+它覆盖 FinQA、ConvFinQA 等金融任务，但不是像我们这样只围绕 FinQA/ConvFinQA gold program 训练。它更像“金融领域大混合 CoT 蒸馏 + RL”。
+
+对我们的可迁移点是：
+
+```text
+teacher candidate
+-> answer check
+-> reasoning/program check
+-> chosen for SFT
+-> failed but informative samples for DPO/GRPO
+```
+
+但在 FinQA/ConvFinQA 上，我们不应该主要依赖 LLM judge，因为我们有更强的 rule verifier：
+
+- gold `Program`
+- executable answer
+- `Normalized Answer`
+- program-answer consistency
+
+参考：[fin-r1.md](/root/MedicalGPT/ref/fin-r1.md)
+
+### **5. DianJin-R1**
+
+DianJin-R1 使用 FinQA 作为金融数值推理数据之一，流程大致是：
+
+```text
+CFLUE / FinQA / CCC
+-> DeepSeek-R1 generate CoT
+-> GPT-4o or rule verifier
+-> SFT data in <think>/<answer>
+-> Qwen2.5 SFT
+-> GRPO with format reward + accuracy reward
+```
+
+它的核心是结构化 CoT + GRPO 双 reward。它没有像我们这样强调 `Program:` 字段，也没有把 ConvFinQA turn-level 作为主链。
+
+对我们来说，DianJin-R1 可以参考 reward 思路，但不建议照搬 `<think>/<answer>`，因为我们当前 schema 已经更适合可验证金融数值推理：
+
+```text
+Evidence:
+Reasoning:
+Program:
+Answer:
+Normalized Answer:
+```
+
+参考：[dianjin-r1.md](/root/MedicalGPT/ref/dianjin-r1.md)
+
+### **6. ETD**
+
+ETD 是最适合改造成训练方案的一条线。它不是某个 FinQA 专用项目，但 `ref/` 里明确建议对 FinQA/ConvFinQA 做：
+
+```text
+gold DSL Program
+-> DSL-to-Python
+-> execute DSL and Python
+-> verify answer_norm
+-> generate short CoT
+-> generate Execution Check
+-> SFT / GRPO
+```
+
+目标格式可以是：
+
+```text
+Evidence:
+- ...
+
+Reasoning:
+Use the current and previous values, subtract the previous value from the current value, then divide by the previous value.
+
+Program:
+divide(subtract(6823, 6161), 6161)
+
+Python Program:
+cash_current = 6823
+cash_previous = 6161
+ans = (cash_current - cash_previous) / cash_previous
+
+Execution Check:
+ans = 0.10745, which matches Normalized Answer.
+
+Answer: 10.745%
+Normalized Answer: 0.10745
+```
+
+这比单纯 CoT 更适合我们，因为 FinQA/ConvFinQA 原生就有 program supervision。
+
+参考：[etd_cot_pot_eot_distillation_research.md](/root/MedicalGPT/ref/etd_cot_pot_eot_distillation_research.md)
+
+
+## # FinQA/ConvFinQA 加入 CoT/PoT 的训练计划
+
+当前 `sft2_dual_merged` 已经有强 baseline，先不要直接把 FinCoT 或本地 distill 数据混进去重训。需要先定义任务场景：
+
+- **核心任务**：金融表文/对话数值推理，要求答案可验证。
+- **主能力**：找证据、选数、生成可执行 Program、得到标准数值答案。
+- **CoT 作用**：解释证据和运算意图，提升复杂题/多轮题的可读推理。
+- **PoT 作用**：承担计算，提供可执行、可 reward 的结构化监督。
+
+结论：**需要 PoT，CoT 可选但应短。**  
+不建议只加长 CoT；最稳路线是基于现有 FinQA/ConvFinQA gold program 增加 PoT/ETD 分支，再少量接入 FinCoT/Fino1-style CoT。
+
+---
+
+- **v2 baseline 保留**
+  - 当前 `dual_answer_sft` 不改，继续作为主对照：
+    ```text
+    Evidence:
+    Program:
+    Answer:
+    Normalized Answer:
+    ```
+  - `sft2_dual_merged` 是当前 v2 最强 baseline。
+  - 评估时同时看 `model_normalized_answer_accuracy` 和 `executed_answer_accuracy`，避免只用 v3 口径误判 v2。
+
+- **PoT 是主升级方向**
+  - FinQA/ConvFinQA 已有 gold `program`、`exe_ans`、`answer_norm`，天然适合 PoT。
+  - PoT 不一定一开始就生成 Python；第一阶段用现有 DSL Program 即可。
+  - v3 `program_executor_sft` 已经是 PoT-like：
+    ```text
+    Evidence:
+    Program:
+    ```
+  - 后续再加 `Python Program:`，由 DSL-to-Python 自动生成并执行校验。
+
+- **CoT 只做短 reasoning**
+  - 不建议使用长 `<think>` 作为主格式。
+  - CoT 应定义为 1-4 句短 `Reasoning:`：
+    ```text
+    Reasoning:
+    Identify the relevant values, compute the difference, then divide by the previous value.
+    ```
+  - CoT 目标是解释“为什么选这些数、为什么用这个公式”，不是让模型自由长篇推理。
+
+
 ## 1. 背景与定位
 
 本调研聚焦 Program of Thought（PoT）在金融数值推理中的价值，以及它和 FinQA、ConvFinQA、distillation、GRPO 的结合方式。核心判断是：PoT 不应只作为一种 inference-time prompting baseline，而应作为一种可执行、可验证、可蒸馏的 reasoning representation。
