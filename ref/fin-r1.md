@@ -1,98 +1,15 @@
-# Fin-R1 调研：金融 reasoning SFT + RL 的领域迁移路线
+# Fin-R1: A Large Language Model for Financial Reasoning through Reinforcement Learning
 
-## 1. 文献摘要
+`Fin-R1` 是一篇非常直接面向金融推理落地的工作。它试图回答的问题不是“通用推理是否能迁移到金融”，而是“如果明确要做金融推理模型，数据、SFT 和 RL 应当如何组织”。因此这篇论文的价值在于给出了一条相对清晰、较容易复现的两阶段训练路线，也就是先用蒸馏后的金融推理数据做监督微调，再用强化学习进一步提升可验证任务上的表现。
 
-论文：`Liu 等 - 2026 - Fin-R1 a large language model for financial reasoning through reinforcement learning.pdf`
+论文摘要可以翻译为：推理型大语言模型在通用领域发展很快，但它们在复杂金融任务中的能力仍需要系统探索。为此，作者提出面向金融场景的推理模型 `Fin-R1`。该模型建立在两阶段架构之上，首先构造基于 `DeepSeek-R1` 蒸馏与清洗得到的金融推理数据集，然后经过监督微调和强化学习训练。尽管参数规模只有 7B，它在多个金融推理任务上接近甚至超过更大的通用模型，并在 `FinQA` 与 `ConvFinQA` 上取得很强结果。
 
-Fin-R1 是面向金融复杂推理的 7B 级模型，公开信息显示其基于 Qwen2.5-7B-Instruct，使用 DeepSeek-R1 蒸馏出的金融 reasoning 数据进行 SFT，再通过 GRPO/RL 优化。官方仓库为 https://github.com/SUFE-AIFLM-Lab/Fin-R1，论文页为 https://huggingface.co/papers/2503.16252。
+在数据集方面，`Fin-R1` 的公开仓库给出了比较清楚的数据构成。其 `Fin-R1-Data` 约包含六万条高质量 CoT 样本，来源覆盖 `FinQA`、`ConvFinQA`、`Finance-Instruct-500K`、`FinCUGE`、`TFNS`、`FinanceIQ`、`FinanceQT`、`FinCorpus`、`Ant_Finance`、`FinPEE` 等多个金融数据源。这里最值得注意的是，作者显式区分了适合做 SFT 的高质量 CoT 数据和可用于 RL 的推理 QA 数据，这种数据分层非常适合数值金融任务。
 
-Fin-R1 的核心目标是把 DeepSeek-R1 的 reasoning 能力迁移到金融场景，尤其是 FinQA、ConvFinQA、金融知识、市场洞察、金融代码和金融合规等任务。公开 README 中描述 Fin-R1-Data 约 60k 条，覆盖 ConvFinQA、FinQA、Finance-Instruct-500K、FinCUGE、TFNS、FinanceIQ、FinanceQT、Ant_Finance、FinCorpus、FinPEE 等来源。
+算法框架上，`Fin-R1` 的 pipeline 非常清楚。第一阶段是数据蒸馏与过滤，核心目标是把 `DeepSeek-R1` 风格的推理过程迁移到金融语料中，并通过多轮筛选提升数据质量。第二阶段是模型训练，其中 SFT 主要让模型掌握金融推理的基本格式、步骤分解与领域表达，RL 则用 `GRPO` 进一步优化最终输出。论文和仓库都强调其奖励不仅看答案正确与否，还看输出格式是否符合预设结构，并在更进一步的版本中引入基于模型的验证器去修正仅靠正则奖励可能带来的偏差。
 
-## 2. 代码框架
+实验结果表明，这种路线在金融领域具有很高的性价比。`Fin-R1` 使用 `Qwen2.5-7B-Instruct` 作为底座，却能在 `FinQA`、`ConvFinQA` 等任务上达到或接近同类最好结果。论文强调，金融推理模型的性能提升并不只取决于参数规模，而与可验证推理样本、训练后奖励信号以及领域数据过滤质量高度相关。对 FinQA 而言，这个结论尤其重要，因为 FinQA 本来就是一个适合精细奖励设计的数据集。
 
-Fin-R1 流程可抽象为：
+对应代码仓库是 `SUFE-AIFLM-Lab/Fin-R1`。仓库 README 展示出较完整的工作流说明，包括数据构建、微调训练、模型推理和场景应用介绍。从公开结构来看，它更像一个面向项目展示与复现说明的仓库，核心重点放在数据构建逻辑、训练流程说明和模型使用方式上，而不是完全开放全部训练脚本细节。它所描述的代码框架围绕 `Fin-R1-Data`、SFT 训练和 `GRPO + reward` 强化学习展开，适合作为 FinQA 后续工程实现时的高层蓝图。
 
-```text
-raw financial datasets
--> DeepSeek-R1 distillation
--> answer scoring
--> reasoning scoring
--> good samples for SFT
--> bad/hard samples for RL
--> Qwen2.5-7B-Instruct SFT
--> GRPO with format reward + accuracy reward
--> financial benchmark evaluation
-```
-
-| 组件 | 作用 | MedicalGPT 对应 |
-| --- | --- | --- |
-| DeepSeek-R1 distillation | 生成金融 CoT | `distill/distill_with_teacher.py` |
-| answer scoring | 筛掉答案错样本 | `score_distill_candidates.py` 的 answer check |
-| reasoning scoring | 检查推理一致性 | 可扩展 program/execution check |
-| SFT | 注入金融 reasoning | `training/supervised_finetuning.py` |
-| GRPO | 可验证强化学习 | `training/financial_grpo_training.py` |
-
-## 3. 实验方法
-
-Fin-R1 的实验方法包括：
-
-1. 数据蒸馏：使用 DeepSeek-R1 生成金融 CoT reasoning。
-2. 两轮筛选：
-   - 答案打分：规则匹配或 Qwen2.5-72B-Instruct 判定答案正确性。
-   - 推理过程打分：检查内部一致性、术语重叠、步骤数量、逻辑一致性、内容多样性、任务相关性和指令一致性。
-3. SFT：使用筛选后的高质量 CoT 数据训练 Qwen2.5-7B-Instruct。
-4. RL：在 SFT 模型基础上使用 GRPO，结合格式奖励和准确度奖励。
-5. 评测：FinQA、ConvFinQA、Ant_Finance、TFNS、Finance-Instruct-500K 等。
-
-公开结果中，Fin-R1 在 FinQA 和 ConvFinQA 上表现突出，说明“金融领域 CoT 蒸馏 + 可验证 RL”路线有效。
-
-## 4. 如何参考到 MedicalGPT
-
-MedicalGPT 已有 FinQA/ConvFinQA strict-A 数据，不应直接替换为 Fin-R1-Data 风格的长 CoT。推荐借鉴 Fin-R1 的双轮筛选：
-
-```text
-teacher candidate
--> answer check
--> reasoning/program check
--> chosen for SFT
--> failed but informative samples for DPO/GRPO
-```
-
-当前 `distill/score_distill_candidates.py` 可以扩展：
-
-- `answer_correct`
-- `program_consistent`
-- `python_program_executable`
-- `reasoning_compact`
-- `evidence_grounded`
-
-训练路线建议：
-
-| 阶段 | 数据 | 目标 |
-| --- | --- | --- |
-| SFT1 | FinQA program-supervised strict-A | 学会单轮表文数值推理 |
-| SFT2 | ConvFinQA turn-level + FinQA replay | 学会多轮 follow-up reasoning |
-| SFT3 optional | Fin-R1-style distilled CoT/ETD | 增强 reasoning 表达 |
-| GRPO | hard-but-verifiable FinQA/ConvFinQA | 优化答案正确性和 program execution |
-
-## 5. 对当前项目的具体改造建议
-
-1. 在 distill scoring 中加入“答案+推理/程序”双轮筛选。
-2. 不把 rejected 只做成格式差样本，而是构造可学习的错误类型：答案错、程序错、不可执行、硬编码答案。
-3. 在 GRPO 数据中优先选择 SFT 模型 pass rate 较低但可判分的样本。
-4. 将 Fin-R1 的“bad 数据进入 RL”改造成 MedicalGPT 的 `hard_verifiable_grpo.jsonl`。
-5. 与 Fino1/FinCoT 数据结合时，保留 MedicalGPT program 主链，不让外部长 CoT 覆盖 gold program。
-
-## 6. 风险与注意事项
-
-- Fin-R1 主要是 CoT 蒸馏路线，MedicalGPT 的优势是 gold program 和 execution verification，不能退化成只学长 CoT。
-- 两轮 judge 若过度依赖 LLM，成本高且可能偏向话术质量。FinQA/ConvFinQA 应优先用 program/exe answer rule-based verifier。
-- RL 数据不能太简单；应选择 hard-but-verifiable，而不是普通 SFT 样本重复训练。
-
-## 7. 参考资料
-
-- Fin-R1 GitHub: https://github.com/SUFE-AIFLM-Lab/Fin-R1
-- Fin-R1 paper: `Liu 等 - 2026 - Fin-R1 a large language model for financial reasoning through reinforcement learning.pdf`
-- Hugging Face paper page: https://huggingface.co/papers/2503.16252
-- DeepSeek-R1
-- MedicalGPT current pipeline: `run_fingpt_v2.ipynb`
+对于 FinQA，这篇论文最有价值的启发有三点。第一，FinQA 非常适合出现在 RL 阶段，因为它天然带有可验证的数值答案和较清晰的中间计算路径。第二，FinQA 数据不应只被线性喂给模型，而应先做质量筛选、过程标准化和难度拆分。第三，在训练范式上，可以考虑先用 `FinQA + ConvFinQA` 注入结构化推理能力，再用面向答案正确率、程序合法性和格式一致性的复合奖励做后续优化，这比单纯追求长 CoT 文本更贴近任务本质。

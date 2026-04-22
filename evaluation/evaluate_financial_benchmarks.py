@@ -39,9 +39,19 @@ FINAL_ANSWER_RE = re.compile(r"(?:最终答案|答案|answer)\s*[:：]\s*(.+)", 
 ANSWER_LINE_RE = re.compile(r"(?m)^Answer\s*[:：]\s*(.+)$", re.IGNORECASE)
 NORMALIZED_ANSWER_RE = re.compile(r"(?m)^Normalized Answer\s*[:：]\s*(.+)$", re.IGNORECASE)
 PROGRAM_RE = re.compile(r"(?:推理程序|program)\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+REASONING_RE = re.compile(r"(?m)^Reasoning\s*[:：]\s*(.+)$", re.IGNORECASE)
 THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
-NUMERIC_STRUCTURED_ANCHORS = ["Evidence:", "Program:"]
+PROGRAM_STOP_RE = re.compile(
+    r"(?im)^\s*(?:Answer|Normalized Answer|Final Answer|Explanation|The final numeric answer)\s*[:：]?.*$"
+)
+PROGRAM_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=\s*(.+)$", re.DOTALL)
+NUMERIC_OUTPUT_FORMATS = ["program_executor", "cot_program", "reasoning_program_executor"]
+NUMERIC_STRUCTURED_ANCHORS = {
+    "program_executor": ["Evidence:", "Program:"],
+    "cot_program": ["Reasoning:", "Evidence:", "Program:"],
+    "reasoning_program_executor": ["Reasoning:", "Evidence:", "Program:"],
+}
 MCQ_STRUCTURED_ANCHORS = ["题目理解：", "推理：", "最终答案："]
 
 
@@ -120,6 +130,16 @@ def parse_args() -> argparse.Namespace:
         default="dual_answer_sft",
         choices=["dual_answer_sft", "program_executor_sft"],
         help="Prompt/target variant used by the data processors when building benchmark examples.",
+    )
+    parser.add_argument(
+        "--numeric_output_format",
+        type=str,
+        default="program_executor",
+        choices=NUMERIC_OUTPUT_FORMATS,
+        help=(
+            "Eval-only output format for numeric benchmarks. The default preserves the existing "
+            "Evidence/Program executor behavior."
+        ),
     )
     parser.add_argument("--output_dir", type=str, required=True)
     return parser.parse_args()
@@ -298,6 +318,44 @@ def extract_normalized_answer(text: str) -> str:
     return match.group(1).strip().split("\n")[0].strip()
 
 
+def get_numeric_output_format(args: Any) -> str:
+    value = getattr(args, "numeric_output_format", "program_executor")
+    if value not in NUMERIC_OUTPUT_FORMATS:
+        return "program_executor"
+    return value
+
+
+def numeric_eval_instruction(output_format: str) -> str:
+    if output_format in {"cot_program", "reasoning_program_executor"}:
+        return (
+            "Output format:\n"
+            "Reasoning: ...\n\n"
+            "Evidence:\n"
+            "- ...\n\n"
+            "Program: ...\n\n"
+            "The final numeric answer will be computed by executing Program.\n"
+            "Do not calculate or round the final answer yourself.\n\n"
+            "Program rule:\n"
+            "- Use only executable numeric DSL expressions such as add, subtract, multiply, divide, max, min, sum, average."
+        )
+    return ""
+
+
+def apply_numeric_eval_output_format(prompt: str, output_format: str) -> str:
+    if output_format == "program_executor":
+        return prompt
+    instruction = numeric_eval_instruction(output_format)
+    if not instruction:
+        return prompt
+    return re.sub(
+        r"Output format:\n.*?(?=\n\nReport context:|\n\nConversation history:|\n\nConversation history questions:|\Z)",
+        instruction,
+        prompt,
+        count=1,
+        flags=re.DOTALL,
+    )
+
+
 def build_numeric_example_from_processor(record: Dict[str, Any], family: str, task_name: str) -> Optional[BenchmarkExample]:
     module = FAMILY_MODULES[family]
     item = module.build_sft_item(record, PROCESSOR_ARGS)
@@ -308,6 +366,7 @@ def build_numeric_example_from_processor(record: Dict[str, Any], family: str, ta
         return None
     prompt = to_text(conversations[0].get("value"))
     chosen = to_text(conversations[1].get("value"))
+    prompt = apply_numeric_eval_output_format(prompt, get_numeric_output_format(PROCESSOR_ARGS))
     metadata = dict(item.get("metadata") or {})
     metadata.setdefault("source_dataset", item.get("source_dataset", family))
     gold_answer = to_text(metadata.get("answer_norm")) or extract_final_answer(chosen)
@@ -558,12 +617,57 @@ def extract_section(text: str, pattern: re.Pattern[str]) -> str:
     return match.group(1).strip().split("\n")[0].strip()
 
 
+def clean_prediction_program_text(text: str) -> str:
+    """Keep evaluation strict on DSL semantics while tolerating common wrappers."""
+    program = (text or "").strip()
+    if not program:
+        return ""
+
+    fenced = re.search(r"```[A-Za-z0-9_-]*\s*(.*?)```", program, flags=re.DOTALL)
+    if fenced:
+        program = fenced.group(1).strip()
+
+    kept_lines = []
+    for raw_line in program.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if kept_lines:
+                break
+            continue
+        if PROGRAM_STOP_RE.match(line):
+            break
+        if kept_lines and line.lower().startswith(("this program", "executing the program")):
+            break
+        if line.startswith("```"):
+            continue
+        kept_lines.append(line)
+    program = "\n".join(kept_lines).strip()
+    if not program:
+        return ""
+
+    if program.lower().startswith("program:"):
+        program = program.split(":", 1)[1].strip()
+
+    assignment = PROGRAM_ASSIGNMENT_RE.match(program)
+    if assignment:
+        program = assignment.group(1).strip()
+
+    return program.strip()
+
+
+def extract_program_section(text: str) -> str:
+    match = PROGRAM_RE.search(text or "")
+    if not match:
+        return ""
+    return clean_prediction_program_text(match.group(1))
+
+
 def normalize_program(text: str) -> str:
-    return re.sub(r"\s+", "", (text or "").lower())
+    return re.sub(r"\s+", "", clean_prediction_program_text(text).lower())
 
 
 def execute_prediction_program(program_text: str) -> Tuple[Optional[float], str, str]:
-    program_canonical = canonicalize_program_re(program_text)
+    program_canonical = canonicalize_program_re(clean_prediction_program_text(program_text))
     if not program_canonical:
         return None, "", "missing_program"
     value, error = execute_program(program_canonical)
@@ -596,9 +700,11 @@ def normalize_answer_text(text: str) -> str:
 
 
 def score_example(example: BenchmarkExample, prediction: str, args: argparse.Namespace) -> Dict[str, Any]:
+    numeric_output_format = get_numeric_output_format(args)
     normalized_answer = extract_normalized_answer(prediction)
     answer = extract_display_answer(prediction) or extract_section(extract_answer_body(prediction), FINAL_ANSWER_RE) or extract_answer_body(prediction).strip().split("\n")[0].strip()
-    program_section = extract_section(prediction, PROGRAM_RE)
+    reasoning = extract_section(prediction, REASONING_RE)
+    program_section = extract_program_section(prediction)
     executed_value, executed_program_canonical, program_error = execute_prediction_program(program_section)
     gold_num = parse_number(example.gold_answer)
     model_pred_num = parse_number(prediction)
@@ -618,7 +724,7 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
             math.isclose(executed_value, model_pred_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol)
         )
     if example.answer_type == "numeric":
-        structured_anchors = NUMERIC_STRUCTURED_ANCHORS
+        structured_anchors = NUMERIC_STRUCTURED_ANCHORS[numeric_output_format]
     elif example.answer_type == "mcq":
         structured_anchors = MCQ_STRUCTURED_ANCHORS
     else:
@@ -634,6 +740,7 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         "answer_coverage": float(bool(answer)),
         "normalized_answer_coverage": float(bool(normalized_answer)),
         "final_answer_coverage": float(bool(answer)),
+        "reasoning_coverage": float(bool(reasoning)),
         "program_section_coverage": float(bool(program_section)),
         "structured_response_coverage": float(all(anchor in (prediction or "") for anchor in structured_anchors)),
         "prediction_chars": len((prediction or "").strip()),
@@ -655,11 +762,6 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         result["executed_answer_accuracy"] = float(executed_answer_correct or 0.0)
         result["model_normalized_answer_accuracy"] = float(model_answer_correct or 0.0) if model_answer_correct is not None else 0.0
         result["program_answer_consistency"] = program_answer_consistency
-        result["answer_correct"] = result["executed_answer_accuracy"]
-        if executed_value is None and model_pred_num is not None and gold_num is not None:
-            result["answer_correct"] = 0.0
-        elif executed_value is None:
-            result["answer_correct"] = 0.0
         if gold_num is None:
             result["answer_correct"] = float(normalize_answer_text(prediction) == normalize_answer_text(example.gold_answer))
         else:
@@ -739,6 +841,7 @@ def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, A
     answer_coverage_scores = [item.get("answer_coverage", item.get("final_answer_coverage", 0.0)) for item in scores]
     normalized_answer_scores = [item.get("normalized_answer_coverage", 0.0) for item in scores]
     final_answer_scores = [item.get("final_answer_coverage", item.get("answer_coverage", 0.0)) for item in scores]
+    reasoning_scores = [item.get("reasoning_coverage", 0.0) for item in scores]
     program_section_scores = [item["program_section_coverage"] for item in scores]
     structured_scores = [item["structured_response_coverage"] for item in scores]
     prediction_chars = [item["prediction_chars"] for item in scores]
@@ -762,6 +865,7 @@ def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, A
         "answer_coverage": _mean(answer_coverage_scores),
         "normalized_answer_coverage": _mean(normalized_answer_scores),
         "final_answer_coverage": _mean(final_answer_scores),
+        "reasoning_coverage": _mean(reasoning_scores),
         "program_section_coverage": _mean(program_section_scores),
         "structured_response_coverage": _mean(structured_scores),
         "numeric_parse_rate": _mean(numeric_parse_scores),
@@ -834,6 +938,8 @@ def build_prediction_row(
         "prediction": prediction,
         "answer_correct": score["answer_correct"],
         "program_correct": score["program_correct"],
+        "reasoning_coverage": score.get("reasoning_coverage"),
+        "structured_response_coverage": score.get("structured_response_coverage"),
         "program_parse_rate": score.get("program_parse_rate"),
         "program_execution_rate": score.get("program_execution_rate"),
         "executed_answer_accuracy": score.get("executed_answer_accuracy"),
@@ -887,6 +993,7 @@ def unload_model(model, tokenizer) -> None:
 def main() -> None:
     args = parse_args()
     PROCESSOR_ARGS.sft_variant = args.processor_sft_variant
+    PROCESSOR_ARGS.numeric_output_format = args.numeric_output_format
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     pass_k_values = parse_pass_k_values(args.pass_k)
@@ -947,6 +1054,7 @@ def main() -> None:
         "sample_top_p": args.sample_top_p,
         "sample_seed": args.sample_seed,
         "processor_sft_variant": args.processor_sft_variant,
+        "numeric_output_format": args.numeric_output_format,
         "primary_metric": "executed_answer_accuracy",
     }
     (output_dir / "benchmark_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1,5 +1,6 @@
 from evaluation.evaluate_financial_benchmarks import (
     aggregate_scores,
+    apply_numeric_eval_output_format,
     build_example_summary_score,
     compute_pass_metrics,
     parse_number,
@@ -20,6 +21,7 @@ def score(answer_correct, task_name="finqa_test"):
         "answer_coverage": 1.0,
         "normalized_answer_coverage": 1.0,
         "final_answer_coverage": 1.0,
+        "reasoning_coverage": 0.0,
         "program_section_coverage": 0.0,
         "structured_response_coverage": 1.0,
         "prediction_chars": 1,
@@ -94,6 +96,154 @@ def test_score_example_uses_normalized_answer_and_program():
     assert score_row["program_correct"] == 1.0
     assert score_row["answer_coverage"] == 1.0
     assert score_row["normalized_answer_coverage"] == 1.0
+
+
+def test_score_example_cot_program_uses_executed_program():
+    example = BenchmarkExample(
+        task_name="finqa_test",
+        prompt="Question",
+        gold_answer="0.14464",
+        answer_type="numeric",
+        record_id="row",
+        metadata={},
+        gold_program="divide(8.1, 56.0)",
+    )
+    args = type(
+        "Args",
+        (),
+        {"numeric_abs_tol": 1e-4, "numeric_rel_tol": 1e-4, "numeric_output_format": "cot_program"},
+    )()
+    score_row = score_example(
+        example,
+        "Reasoning: use leased facilities over total facilities.\n\nEvidence:\n- x\n\nProgram: divide(8.1, 56.0)",
+        args,
+    )
+
+    assert score_row["answer_correct"] == 1.0
+    assert score_row["executed_answer_accuracy"] == 1.0
+    assert score_row["model_normalized_answer_accuracy"] == 0.0
+    assert score_row["program_parse_rate"] == 1.0
+    assert score_row["reasoning_coverage"] == 1.0
+    assert score_row["structured_response_coverage"] == 1.0
+
+
+def test_score_example_cleans_fenced_program_assignment():
+    example = BenchmarkExample(
+        task_name="convfinqa_test",
+        prompt="Question",
+        gold_answer="60.94",
+        answer_type="numeric",
+        record_id="row",
+        metadata={},
+        gold_program="60.94",
+    )
+    args = type(
+        "Args",
+        (),
+        {"numeric_abs_tol": 1e-4, "numeric_rel_tol": 1e-4, "numeric_output_format": "cot_program"},
+    )()
+    score_row = score_example(
+        example,
+        (
+            "Reasoning: read the 2007 value.\n\n"
+            "Evidence:\n- weighted average exercise price per share in 2007 is $60.94.\n\n"
+            "Program: ```plaintext\n"
+            "result = 60.94\n"
+            "```\n\n"
+            "The final numeric answer will be computed by executing the program provided above."
+        ),
+        args,
+    )
+
+    assert score_row["answer_correct"] == 1.0
+    assert score_row["executed_program"] == "60.94"
+    assert score_row["executed_answer_accuracy"] == 1.0
+    assert score_row["program_execution_rate"] == 1.0
+    assert score_row["program_string_accuracy"] == 1.0
+
+
+def test_score_example_cot_program_requires_program_even_with_answer():
+    example = BenchmarkExample(
+        task_name="finqa_test",
+        prompt="Question",
+        gold_answer="0.10745",
+        answer_type="numeric",
+        record_id="row",
+        metadata={},
+        gold_program="divide(662, 6161)",
+    )
+    args = type(
+        "Args",
+        (),
+        {"numeric_abs_tol": 1e-4, "numeric_rel_tol": 1e-4, "numeric_output_format": "cot_program"},
+    )()
+    score_row = score_example(
+        example,
+        "Reasoning: divide the change by the starting value.\n\nEvidence:\n- x\n\nAnswer: 10.745%",
+        args,
+    )
+
+    assert score_row["answer_correct"] == 0.0
+    assert score_row["executed_answer_accuracy"] == 0.0
+    assert score_row["model_normalized_answer_accuracy"] == 1.0
+    assert score_row["program_parse_rate"] == 0.0
+    assert score_row["reasoning_coverage"] == 1.0
+    assert score_row["structured_response_coverage"] == 0.0
+
+
+def test_score_example_reasoning_program_executor_keeps_program_primary():
+    example = BenchmarkExample(
+        task_name="finqa_test",
+        prompt="Question",
+        gold_answer="0.14464",
+        answer_type="numeric",
+        record_id="row",
+        metadata={},
+        gold_program="divide(8.1, 56.0)",
+    )
+    args = type(
+        "Args",
+        (),
+        {"numeric_abs_tol": 1e-4, "numeric_rel_tol": 1e-4, "numeric_output_format": "reasoning_program_executor"},
+    )()
+    score_row = score_example(
+        example,
+        "Reasoning: use leased facilities over total facilities.\n\nEvidence:\n- x\n\nProgram: divide(8.1, 56.0)",
+        args,
+    )
+
+    assert score_row["answer_correct"] == 1.0
+    assert score_row["executed_answer_accuracy"] == 1.0
+    assert score_row["model_normalized_answer_accuracy"] == 0.0
+    assert score_row["reasoning_coverage"] == 1.0
+    assert score_row["structured_response_coverage"] == 1.0
+
+
+def test_apply_numeric_eval_output_format_adds_reasoning_prompt_without_changing_context_order():
+    prompt = (
+        "You are a financial table-and-text reasoning assistant.\n\n"
+        "Current question:\nwhat is the net change?\n\n"
+        "Output format:\n"
+        "Evidence:\n"
+        "- ...\n\n"
+        "Program: ...\n\n"
+        "The final numeric answer will be computed by executing Program.\n"
+        "Do not calculate or round the final answer yourself.\n\n"
+        "Program rule:\n"
+        "- Use only executable numeric DSL expressions such as add, subtract, multiply, divide, max, min, sum, average.\n\n"
+        "Report context:\nlong report context"
+    )
+    cot_prompt = apply_numeric_eval_output_format(prompt, "cot_program")
+    reasoning_program_prompt = apply_numeric_eval_output_format(prompt, "reasoning_program_executor")
+
+    assert "Reasoning: ..." in cot_prompt
+    assert "Evidence:" in cot_prompt
+    assert "Program: ..." in cot_prompt
+    assert "Answer: ..." not in cot_prompt
+    assert cot_prompt.index("Current question:") < cot_prompt.index("Report context:")
+    assert "Reasoning: ..." in reasoning_program_prompt
+    assert "Evidence:" in reasoning_program_prompt
+    assert "Program: ..." in reasoning_program_prompt
 
 
 def test_score_example_uses_executed_program_when_model_answer_is_rounded_wrong():
