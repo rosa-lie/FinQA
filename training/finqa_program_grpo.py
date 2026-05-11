@@ -28,6 +28,9 @@ from evaluation.evaluate_financial_benchmarks import execute_prediction_program
 
 PROGRAM_NUMERIC_REQUIRED = ["Evidence:", "Program:"]
 PROGRAM_NUMERIC_FORBIDDEN = ["Reasoning:", "Answer:", "Normalized Answer:", "Program: N/A"]
+HARD_INVALID_REWARD = -1.0
+WRONG_EXECUTABLE_REWARD_CAP = 0.2
+CORRECT_EXECUTABLE_BASE_REWARD = 1.0
 PROGRAM_OPS = [
     "add",
     "subtract",
@@ -114,6 +117,24 @@ def extract_anchor(text: str, anchor: str) -> str:
         if pos >= 0:
             end = min(end, pos)
     return text[start:end].strip()
+
+
+def anchor_count(text: str, anchor: str) -> int:
+    return first_text(text).count(anchor)
+
+
+def has_post_program_text(text: str) -> bool:
+    text = first_text(text)
+    marker = "Program:"
+    if marker not in text:
+        return False
+    program_tail = text[text.rfind(marker) + len(marker):].strip()
+    if not program_tail:
+        return False
+    lines = [line.strip() for line in program_tail.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return False
+    return True
 
 
 def normalize_number(text: str) -> Optional[float]:
@@ -395,136 +416,141 @@ def audit_program_numeric_rows(rows: List[Dict[str, Any]], script_args: ScriptAr
     }
 
 
-def make_reward_funcs(script_args: ScriptArguments):
-    def reward_program_executable(completions, **kwargs):
-        rewards = []
-        for completion in completions:
-            program = extract_anchor(completion_text(completion), "Program:")
-            if not program or program.strip().upper() == "N/A":
-                rewards.append(-0.10)
-                continue
-            executed_value, _, _ = execute_prediction_program(program)
-            reward = script_args.program_executable_reward_weight if executed_value is not None else -0.10
-            rewards.append(reward)
-        return rewards
+class ProgramDiagnostics:
+    def __init__(self):
+        self.pending: Dict[str, List[float]] = {}
 
-    def reward_program_execution_closeness(completions, gold_answer=None, **kwargs):
+    def add(self, name: str, value: Optional[float]) -> None:
+        if value is None:
+            return
+        self.pending.setdefault(name, []).append(float(value))
+
+    def pop_means(self) -> Dict[str, float]:
+        metrics = {}
+        for name, values in self.pending.items():
+            valid = [value for value in values if value == value]
+            if valid:
+                metrics[name] = sum(valid) / len(valid)
+        self.pending.clear()
+        return metrics
+
+
+class ProgramDiagnosticGRPOTrainer(GRPOTrainer):
+    def __init__(self, *args, program_diagnostics: Optional[ProgramDiagnostics] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.program_diagnostics = program_diagnostics
+
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
+        mode = "train" if self.model.training else "eval"
+        if self.program_diagnostics is not None:
+            device = self.accelerator.device
+            for name, local_mean in sorted(self.program_diagnostics.pop_means().items()):
+                gathered = self.accelerator.gather(torch.tensor(local_mean, device=device))
+                self._metrics[mode][name].append(gathered.nanmean().item())
+        super().log(logs, start_time)
+
+
+def evaluate_program_completion(script_args: ScriptArguments, completion: Any, gold_ans: str, gold_prog: str) -> Dict[str, Any]:
+    text = completion_text(completion)
+    pred_program = extract_anchor(text, "Program:")
+    forbidden_anchor = any(anchor in text for anchor in PROGRAM_NUMERIC_FORBIDDEN)
+    multiple_program = anchor_count(text, "Program:") > 1
+    post_program_text = has_post_program_text(text)
+    result: Dict[str, Any] = {
+        "text": text,
+        "program": pred_program,
+        "core_score": HARD_INVALID_REWARD,
+        "executable": 0.0,
+        "exact_match": 0.0,
+        "invalid": 1.0,
+        "wrong_executable": 0.0,
+        "structure_score": 0.0,
+        "argument_coverage": 0.0,
+        "step_count_score": 0.0,
+        "completion_words": float(len(text.split())),
+        "forbidden_anchor": 1.0 if forbidden_anchor else 0.0,
+        "multiple_program": 1.0 if multiple_program else 0.0,
+        "post_program_text": 1.0 if post_program_text else 0.0,
+    }
+    if not pred_program or pred_program.strip().upper() == "N/A":
+        return result
+
+    executed_value, _, _ = execute_prediction_program(pred_program)
+    if executed_value is None:
+        return result
+
+    closeness = numeric_closeness(str(executed_value), gold_ans, script_args.answer_abs_tol, script_args.answer_rel_tol)
+    structure = program_similarity(pred_program, gold_prog)
+    argument_coverage = program_argument_coverage(pred_program, gold_prog)
+    step_count = program_step_count_score(pred_program, gold_prog)
+    exact_match = numeric_equal(str(executed_value), gold_ans, script_args.answer_abs_tol, script_args.answer_rel_tol)
+
+    format_penalty = 0.0
+    format_penalty += 0.05 if forbidden_anchor else 0.0
+    format_penalty += 0.05 if multiple_program else 0.0
+    format_penalty += 0.05 if post_program_text else 0.0
+    brevity_bonus = script_args.brevity_reward_weight * length_shape_score(text, target_low=40, target_high=120, hard_cap=160)
+    if exact_match:
+        core_score = CORRECT_EXECUTABLE_BASE_REWARD
+        core_score += 0.05 * structure
+        core_score += 0.03 * argument_coverage
+        core_score += 0.02 * step_count
+        core_score += brevity_bonus
+        core_score = max(CORRECT_EXECUTABLE_BASE_REWARD, core_score - format_penalty)
+    else:
+        core_score = WRONG_EXECUTABLE_REWARD_CAP * numeric_closeness(
+            str(executed_value), gold_ans, script_args.answer_abs_tol, script_args.answer_rel_tol
+        )
+        core_score = min(WRONG_EXECUTABLE_REWARD_CAP, max(0.0, core_score - format_penalty))
+
+    result.update(
+        {
+            "core_score": core_score,
+            "executable": 1.0,
+            "exact_match": 1.0 if exact_match else 0.0,
+            "invalid": 0.0,
+            "wrong_executable": 0.0 if exact_match else 1.0,
+            "structure_score": structure,
+            "argument_coverage": argument_coverage,
+            "step_count_score": step_count,
+        }
+    )
+    return result
+
+
+def make_reward_funcs(script_args: ScriptArguments, diagnostics: Optional[ProgramDiagnostics] = None):
+    def reward_program_hard_gate(completions, gold_answer=None, gold_program=None, **kwargs):
         rewards = []
         gold_answer = gold_answer or [""] * len(completions)
-        for completion, gold in zip(completions, gold_answer):
-            program = extract_anchor(completion_text(completion), "Program:")
-            executed_value, _, _ = execute_prediction_program(program)
-            reward = 0.0
-            if executed_value is not None:
-                reward = script_args.program_execution_closeness_reward_weight * numeric_closeness(
-                    str(executed_value), gold, script_args.answer_abs_tol, script_args.answer_rel_tol
-                )
-            rewards.append(reward)
-        return rewards
-
-    def reward_program_structure(completions, gold_program=None, **kwargs):
-        rewards = []
         gold_program = gold_program or [""] * len(completions)
-        for completion, gold_prog in zip(completions, gold_program):
-            pred_program = extract_anchor(completion_text(completion), "Program:")
-            if not pred_program or pred_program.strip().upper() == "N/A":
-                rewards.append(0.0)
-                continue
-            rewards.append(
-                script_args.program_structure_reward_weight * program_similarity(pred_program, gold_prog)
-            )
-        return rewards
-
-    def reward_program_argument_coverage(completions, gold_program=None, **kwargs):
-        rewards = []
-        gold_program = gold_program or [""] * len(completions)
-        for completion, gold_prog in zip(completions, gold_program):
-            pred_program = extract_anchor(completion_text(completion), "Program:")
-            if not pred_program or pred_program.strip().upper() == "N/A":
-                rewards.append(0.0)
-                continue
-            rewards.append(
-                script_args.program_argument_coverage_reward_weight
-                * program_argument_coverage(pred_program, gold_prog)
-            )
-        return rewards
-
-    def reward_program_step_count(completions, gold_program=None, **kwargs):
-        rewards = []
-        gold_program = gold_program or [""] * len(completions)
-        for completion, gold_prog in zip(completions, gold_program):
-            pred_program = extract_anchor(completion_text(completion), "Program:")
-            if not pred_program or pred_program.strip().upper() == "N/A":
-                rewards.append(0.0)
-                continue
-            rewards.append(
-                script_args.program_step_count_reward_weight * program_step_count_score(pred_program, gold_prog)
-            )
-        return rewards
-
-    def reward_program_exact_match_bonus(completions, gold_answer=None, **kwargs):
-        rewards = []
-        gold_answer = gold_answer or [""] * len(completions)
-        for completion, gold in zip(completions, gold_answer):
+        programs = []
+        for completion, gold_ans, gold_prog in zip(completions, gold_answer, gold_program):
             program = extract_anchor(completion_text(completion), "Program:")
-            executed_value, _, _ = execute_prediction_program(program)
-            if executed_value is not None and numeric_equal(
-                str(executed_value), gold, script_args.answer_abs_tol, script_args.answer_rel_tol
-            ):
-                rewards.append(script_args.program_exact_match_bonus_weight)
-            else:
-                rewards.append(0.0)
-        return rewards
-
-    def reward_format_gate(completions, **kwargs):
-        rewards = []
-        for completion in completions:
-            text = completion_text(completion)
-            anchor_hits = [anchor in text for anchor in PROGRAM_NUMERIC_REQUIRED]
-            anchor_score = sum(anchor_hits) / len(PROGRAM_NUMERIC_REQUIRED)
-            order_bonus = 0.0
-            if all(anchor_hits):
-                evidence_pos = text.find("Evidence:")
-                program_pos = text.find("Program:")
-                if 0 <= evidence_pos < program_pos:
-                    order_bonus = 0.25
-            penalty = sum(1 for anchor in PROGRAM_NUMERIC_FORBIDDEN if anchor in text) * 0.20
-            schema_score = min(anchor_score + order_bonus, 1.0)
-            rewards.append(schema_score * script_args.format_reward_weight - penalty)
-        return rewards
-
-    def reward_evidence_support(completions, input_prompt_raw=None, prompt=None, **kwargs):
-        rewards = []
-        input_prompt_raw = input_prompt_raw or prompt or [""] * len(completions)
-        for completion, raw_prompt in zip(completions, input_prompt_raw):
-            program = extract_anchor(completion_text(completion), "Program:")
-            executed_value, _, _ = execute_prediction_program(program)
-            if executed_value is None:
-                rewards.append(0.0)
-                continue
-            evidence = extract_anchor(completion_text(completion), "Evidence:")
-            raw_prompt_text = prompt_text_from_any(raw_prompt)
-            overlap_score = evidence_overlap_score(evidence, raw_prompt_text)
-            rewards.append(script_args.evidence_reward_weight * overlap_score)
-        return rewards
-
-    def reward_length_regularizer(completions, **kwargs):
-        rewards = []
-        for completion in completions:
-            text = completion_text(completion)
-            rewards.append(script_args.brevity_reward_weight * length_shape_score(text))
+            programs.append(program.strip())
+            diagnostic_result = evaluate_program_completion(script_args, completion, gold_ans, gold_prog)
+            if diagnostics is not None:
+                diagnostics.add("program/core_score", diagnostic_result["core_score"])
+                diagnostics.add("program/executable_rate", diagnostic_result["executable"])
+                diagnostics.add("program/exact_match_rate", diagnostic_result["exact_match"])
+                diagnostics.add("program/invalid_rate", diagnostic_result["invalid"])
+                diagnostics.add("program/wrong_executable_rate", diagnostic_result["wrong_executable"])
+                diagnostics.add("program/structure_score", diagnostic_result["structure_score"])
+                diagnostics.add("program/argument_coverage", diagnostic_result["argument_coverage"])
+                diagnostics.add("program/step_count_score", diagnostic_result["step_count_score"])
+                diagnostics.add("program/completion_words", diagnostic_result["completion_words"])
+                diagnostics.add("program/forbidden_anchor_rate", diagnostic_result["forbidden_anchor"])
+                diagnostics.add("program/multiple_program_rate", diagnostic_result["multiple_program"])
+                diagnostics.add("program/post_program_text_rate", diagnostic_result["post_program_text"])
+            rewards.append(diagnostic_result["core_score"])
+        if diagnostics is not None and completions:
+            non_empty_programs = [program for program in programs if program and program.upper() != "N/A"]
+            diagnostics.add("program/has_program_rate", len(non_empty_programs) / len(completions))
+            if non_empty_programs:
+                diagnostics.add("program/unique_program_ratio", len(set(non_empty_programs)) / len(non_empty_programs))
         return rewards
 
     return [
-        reward_program_executable,
-        reward_program_execution_closeness,
-        reward_program_structure,
-        reward_program_argument_coverage,
-        reward_program_step_count,
-        reward_program_exact_match_bonus,
-        reward_format_gate,
-        reward_evidence_support,
-        reward_length_regularizer,
+        reward_program_hard_gate,
     ]
 
 
@@ -723,14 +749,16 @@ def grpo_train(model_args: ModelConfig, script_args: ScriptArguments, training_a
         encoding="utf-8",
     )
 
-    reward_funcs = make_reward_funcs(script_args)
-    trainer = GRPOTrainer(
+    program_diagnostics = ProgramDiagnostics()
+    reward_funcs = make_reward_funcs(script_args, diagnostics=program_diagnostics)
+    trainer = ProgramDiagnosticGRPOTrainer(
         model=model,
         processing_class=tokenizer,
         reward_funcs=reward_funcs,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset if training_args.eval_strategy != "no" else None,
+        program_diagnostics=program_diagnostics,
     )
 
     last_checkpoint = get_checkpoint(training_args)
