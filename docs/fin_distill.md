@@ -341,7 +341,7 @@ program-conditioned prompt 收缩 + smoke 配置调整
 ### Candidates 策略更新（执行优先级）
 0. 强制 clean 过滤：所有 candidates 先过 `<think>/<answer>` 完整性校验；不 clean 的候选直接剔除，不进入 SFT/DPO。DPO 只保留 clean vs clean 的 pair，避免把格式不完整当成偏好信号。
 1. 默认 candidates 数量调整为 3：API 只生成 3 个候选，减少无收益的近似重复。
-2. 人工构造 rejected（TODO 多样化）：
+2. 人工构造 rejected（后续按错误类型继续增加多样性）：
    a) 轻微但明确错误的 hard negative（数值±1%、算子替换、引用行错误）。
    b) 缺失 `<think></think>` 的样本（思维链缺失）。
    c) `<think>` 内直接输出 program 片段而非自然语言（非自然语言思维链）。
@@ -406,6 +406,5 @@ reasoning selection 默认只在 `answer_check_pass=True` 时运行；若显式�
 ### DPO: chosen/rejected
 
 组内选择逻辑是“先统一打分、再选 chosen/rejected”。`chosen` 只从带 `clean_response` 的候选里按 `quality_score` 取最高分，所以 `distill_sft.jsonl` 的 assistant 输出以及 `distill_dpo.jsonl` 的 `response_chosen` 都始终使用 `clean_response`。`rejected` 现在只从同组 **clean** 候选里取最低分，因此 DPO 仅包含 clean vs clean 的 pair，避免把格式缺失当成偏好信号。
-
 
 
