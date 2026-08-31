@@ -80,7 +80,7 @@ FinQA 应该当成“Program Learning + Answer Prediction”任务，而不是 C
 
 ---
 
-TODO：
+待完善方向：
 
 **对raw进行的预处理**
 

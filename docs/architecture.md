@@ -1,104 +1,41 @@
 # 项目架构整理
 
-## 当前结论
+本文记录当前仓库中金融推理子项目的真实模块关系。仓库仍保留 MedicalGPT 原有训练、推理和服务能力，但 FinQA/ConvFinQA 主线已经形成独立的数据、训练、评测和实验脚本闭环。
 
-当前仓库已经具备按领域拆分的主干结构，主体实现集中在功能子目录中，根目录当前只保留训练编排 shell 和实验 notebook 入口。
+## 1. 总体流向
 
-本次整理后：
+当前金融主链可以概括为 `raw FinQA/ConvFinQA -> financial_data_processors -> Program SFT/RS-SFT data -> training -> frontier acquisition -> GRPO/Dr.GRPO -> evaluation/evaluate_financial_benchmarks.py`。模型输入是金融文本、表格、当前问题和必要的对话历史。模型输出是 `Evidence + Program`。评测阶段由 executor 执行 program，得到 normalized answer，并与 gold answer 比较。
 
-1. `pipelines/scripts/` 已删除
-2. `pipelines/notebooks/` 中的 notebook 已移动到仓库根目录
-3. shell 编排和实验 notebook 默认都从仓库根目录启动
+这个架构的关键是训练框架保持通用，金融任务约束集中在数据处理、prompt contract、program parser、executor reward 和 benchmark evaluator 中。这样可以避免把 FinQA 特定逻辑散落到通用 SFT trainer 里。
 
-这意味着当前目录组织的原则已经比较明确：**功能实现放在子目录，根目录只保留 shell 编排和 notebook。**
+## 2. 数据处理层
 
-## 目录分层
+`financial_data_processors/` 是金融数据主入口。它负责读取 FinQA、ConvFinQA turn-level 数据，做 strict tier 过滤、字段归一、program canonicalization、answer normalization、executor 校验和 SFT JSONL 导出。统一入口是 `/root/miniconda3/bin/python -m financial_data_processors`。
 
-### 1. 训练层
+ConvFinQA 的处理必须使用 turn-level supervision。当前问题、当前 program 和当前答案来自 `annotation.cur_dial[-1]`、`annotation.cur_program` 和 `annotation.exe_ans`。final QA 字段只作为 metadata 或 fallback。这一点属于数据层约束，不应该交给训练脚本临时修补。
 
-- `training/`
-- 职责：SFT、DPO、GRPO、PPO、ORPO、RM、PT 等训练实现
-- 代表模块：`training/supervised_finetuning.py`、`training/dpo_training.py`
+## 3. 训练层
 
-### 2. 推理与服务层
+普通 SFT 继续使用 `training/supervised_finetuning.py`。它负责 tokenizer、dataset、LoRA、DeepSpeed/accelerate 配置、截断和优化更新。金融任务的 prompt 和 target 已经在数据处理层构造好，因此 SFT trainer 不需要理解 FinQA DSL。
 
-- `serving/`
-- 职责：离线推理、Gradio、FastAPI、OpenAI-compatible API、ChatPDF
-- 代表模块：`serving/inference.py`、`serving/openai_api.py`
+GRPO 主入口是 `training/finqa_program_grpo.py`。它是金融子项目中最重要的 RL 训练文件，负责加载 frontier 数据，对每个 prompt 采样多个 completion，解析 `Program`，调用 executor 得到 reward，并交给 TRL GRPOTrainer 完成 logprob、advantage、clipped objective 和参数更新。v34r24 在这里映射 Dr.GRPO 配置，重点参数包括 `scale_rewards=none` 和 `loss_type=dr_grpo`。
 
-### 3. 数据处理层
+## 4. frontier 与 sweep 脚本
 
-- `data/`
-- 职责：清洗、审计、过滤、格式校验
-- 代表模块：`data/clean_sharegpt_dataset.py`、`data/filter_sharegpt_by_audit.py`
+`scripts/build_v34r23_current_policy_manifest.py` 用于基于当前 RS-SFT policy 重新采样训练样本，并记录 greedy 与 sampled candidates。`scripts/build_v34r23_frontier_grpo_data.py` 把 greedy-wrong、pass@8-executor-correct 和 executable-wrong hard negative 样本整理成 GRPO 数据。`scripts/v34r23_prompt_processor.py` 维护 strict program prompt contract，禁止 Reasoning/Answer marker、多个 Program section 和 assignment-style program。
 
-### 4. 金融数据路由层
+`scripts/run_v34r23_grpo40_checkpoint_sweep.py` 负责 v34r23 frontier GRPO 的 checkpoint sweep。`scripts/run_v34r24_drgrpo_checkpoint_sweep.py` 和 `scripts/evaluate_v34r24_drgrpo_long_sweep.py` 负责 Dr.GRPO sweep 与筛选。v34r24 的 100-step sweep 中 checkpoint-50 通过 joint-64 gate，checkpoint-100 未超过它，因此只把 checkpoint-50 推进 full-1237 evaluation。
 
-- `financial_data_processors/`
-- 职责：按数据族做解析、统一转换成 SFT / DPO 所需格式
-- 入口：`python -m financial_data_processors`
-- 特点：这是目前金融子项目里最接近可复用领域模块的部分
+## 5. 评测层
 
-### 5. 蒸馏流水线层
+`evaluation/evaluate_financial_benchmarks.py` 是当前项目 headline 结果的唯一评测入口。它支持 FinQA/ConvFinQA 数据加载、greedy generation、program extraction、executor execution、normalized answer comparison、allowlist gate 和 summary 导出。报告主指标是 full-1237 temperature-0 greedy program executor 的 `executed_answer_accuracy/pass@1_greedy`。
 
-- `distill/`
-- 职责：蒸馏数据构造、teacher 生成、多候选打分、SFT/DPO/audit 导出
-- 入口：`distill/run_financial_distill_pipeline.py`
-- 特点：已呈现 pipeline 组织方式，是金融 reasoning 主链路的重要中枢
+评测输出通常保存到 `/root/autodl-tmp/outputs/financial_reasoning_rl/benchmarks/`。当前 README 使用的两个主要 artifact 是 `final_project_best_pipeline_vs_qwen_base_full_program_executor/benchmark_summary.json` 和 `v34r24_drgrpo_ckpt50_full1237_program_executor/benchmark_summary.json`。
 
-### 6. 评测层
+## 6. 文档层
 
-- `evaluation/`
-- 职责：量化评测与金融 benchmark 评测
-- 代表模块：`evaluation/eval_quantize.py`、`evaluation/evaluate_financial_benchmarks.py`
+`docs/fin_datasets_v3.md` 记录 program-only 数据格式、ConvFinQA turn-level supervision、RS-SFT 数据和 frontier acquisition。`docs/fin_rl.md` 记录 v34r23 GRPO reward 与 v34r24 Dr.GRPO 配置。`docs/financial_reasoning_benchmark.md` 固定 full-1237 evaluator 口径。`docs/grpo_current_progress.md` 汇总 v34r22 到 v34r24 的当前进度和失败教训。
 
-### 7. 工具层
+## 7. 面试回答
 
-- `tooling/`
-- 职责：tokenizer 构建、adapter 合并、量化等辅助工具
-
-### 8. 根目录编排层
-
-- 职责：直接可运行的 shell 脚本与实验 notebook
-- 代表文件：`run_sft.sh`、`run_dpo.sh`、`run_fingpt_min.ipynb`、`run_training_dpo_pipeline.ipynb`
-
-### 9. 配置层
-
-- `configs/`
-- 职责：deepspeed / zero 配置
-
-### 10. 文档层
-
-- `docs/`
-- 职责：数据、蒸馏、训练参数、FAQ 与架构说明
-
-## 路径约定
-
-当前建议的使用方式如下：
-
-```bash
-python -m training.supervised_finetuning ...
-python -m training.dpo_training ...
-python -m serving.inference ...
-python -m data.clean_sharegpt_dataset ...
-python -m financial_data_processors ...
-python -m distill.run_financial_distill_pipeline ...
-sh run_sft.sh
-```
-
-Notebook 统一位于仓库根目录：
-
-- `run_fingpt_min.ipynb`
-- `run_fingpt_distill.ipynb`
-- `run_training_dpo_pipeline.ipynb`
-- `run_training_ppo_pipeline.ipynb`
-
-## 本次已完成
-
-- 删除了 `pipelines/scripts/`
-- 将 `pipelines/notebooks/` 中的 notebook 收敛到仓库根目录
-- 修正了仓库内与旧路径相关的文档引用
-
-## 一句话原则
-
-**以后新增或修改功能时，优先维护功能子目录中的真实实现；根目录只保留 shell 编排和 notebook。**
+面试中可以把系统职责拆成四层。数据层把 FinQA/ConvFinQA 转成可验证 program supervision；训练层通过 SFT 和 RS-SFT 建立可执行 program 能力；RL 层只在 current-policy frontier 上用 executor reward 做校准；评测层用外部 executor 做 full-1237 greedy 检验。这个拆分能说明项目不是堆训练脚本，而是围绕可验证金融数值推理设计了完整闭环。

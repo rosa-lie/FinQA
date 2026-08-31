@@ -1,139 +1,47 @@
-# 金融推理 benchmark 评估流程
+# Program-executor full-1237 评测口径
 
-目标：
-- 比较 `基座模型`
-- 比较 `SFT1` 对英文金融数值推理的提升
-- 比较 `SFT1 + SFT2` 对中文金融知识与泛化的追加提升
-- 检查 `SFT2` 是否破坏了 `SFT1` 已学到的推理能力
+本文记录当前 FinQA/ConvFinQA 主线的稳定评测方式。旧版 benchmark 曾经混合 ConvFinQA、Fineval、CFLUE 等任务，用于早期泛金融探索；当前 README headline 只采用 program-executor full-1237 口径。
 
-## 1. benchmark 设计
+## 1. 背景问题
 
-本项目当前采用三类评测任务：ConvFinQA test 看英文金融数值推理和表格理解，重点衡量 SFT1 增益；fingpt-fineval test 看中文金融知识和考试型推理，重点衡量 SFT2 增益；CFLUE 小规模外部任务集看中文金融泛化，避免只在训练分布内变强。打分维度上，ConvFinQA 以答案准确率为主、程序一致率为辅；Fineval/CFLUE 以选择题答案准确率为主。结果解读时重点看三组差值：sft1 - base、sft2 - sft1、sft2 - base，同时检查 sft2 是否在 ConvFinQA 上出现遗忘。
+金融数值推理不能只看生成文本里是否出现某个答案字符串。模型可能写出正确数字但 program 不可执行，也可能输出合法 program 但公式方向错误。当前项目因此把主指标定义为 executor 执行生成 program 后的答案准确率。这个指标能同时约束 evidence grounding、program parse、program execution 和 normalized answer correctness。
 
-### 1.1 ConvFinQA test
-- 目标：评估英文金融数值推理、表格理解、多轮上下文跟踪
-- 用途：最直接反映 `SFT1` 增益
-- 数据来源：本地 `ConvFinQA test_turn.json`
-- 主指标：`answer_accuracy`
-- 辅指标：`program_accuracy`
+评测集合固定为 ConvFinQA test 869 条 turn-level 样本加 FinQA test 368 条样本，总计 1237 条。解码固定为 temperature 0 的单次 greedy generation。模型输出 `Evidence + Program`，评测脚本从 completion 中抽取 `Program`，执行 DSL，再将执行结果与 gold normalized answer 做数值容差比较。
 
-说明：
-- `answer_accuracy` 优先按数值容差匹配
-- 若无法解析为数值，则回退到规范化字符串匹配
-- `program_accuracy` 通过比较生成结果中的 `推理程序` 字段与 gold program 的规范化字符串得到
+## 2. 核心指标
 
-### 1.2 fingpt-fineval test
-- 目标：评估中文金融知识、考试型推理、选项判断
-- 用途：最直接反映 `SFT2` 增益
-- 数据来源：默认通过 Hugging Face `FinGPT/fingpt-fineval` 的 `test` split 加载
-- 主指标：`answer_accuracy`
+`pass@1_greedy` 是当前 README 的主指标。它等价于单次 greedy completion 的 `executed_answer_accuracy`，不使用采样、不使用 rerank，也不读取训练 reward。这个指标回答的问题是，部署时模型一次输出 program，executor 执行后能答对多少题。
 
-说明：
-- 当前实现按生成式评测统一口径执行
-- 优先从 `最终答案` 字段抽取选项字母 `A-F`
-- 若无法抽取标准选项，则回退到规范化字符串匹配
+`program_execution_rate` 是 program 能否被 parser 和 executor 成功执行的比例。它不是答案准确率，因为 wrong-executable program 也会计入执行成功。执行成功率能帮助判断 schema 和 DSL 是否稳定，但不能替代 `pass@1_greedy`。
 
-### 1.3 CFLUE 小规模外部任务集
-- 目标：评估中文金融泛化，而不是只看训练分布内收益
-- 用途：验证 `SFT1 + SFT2` 是否在外部金融考试/知识任务上继续提升
-- 数据来源：用户本地准备的若干 `json/jsonl` 文件
-- 主指标：每个子任务的 `answer_accuracy`
+`pass@8` 是采样诊断指标，用于判断候选空间里是否存在正确 program。它适合 frontier acquisition，因为如果 greedy 错但 pass@8 中有正确候选，说明模型已经有潜在能力，只是 greedy policy 需要校准。`pass@8` 不能直接当成部署主结果。
 
-推荐先选 2 到 4 个客观题子任务：
-- 银行从业
-- 证券从业
-- 基金从业
-- 保险相关知识题
+rerank 指标用于研究 verifier 或 executor reranking 的上限。它回答的是“如果有多个候选并能选中正确程序，效果会怎样”，不等价于单次生成能力。训练 reward 是优化过程中的信号，只能辅助解释训练是否有梯度，不应和 benchmark accuracy 混在一个 headline 中。
 
-原因：
-- 这类任务与 `fingpt-fineval` 同属金融知识推理，但来源不同
-- 当前脚本已对选择题生成式评测做了稳定支持
-- 可以避免在第一版 benchmark 中同时引入阅读理解、生成摘要等任务专属打分器
+## 3. 当前 full-1237 结果
 
-## 2. 模型对比方式
+| 模型 | ConvFinQA 869 | FinQA 368 | Macro/full-1237 | 执行成功率 | 数据来源 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Qwen2.5-7B-Instruct | 0.318757 | 0.163043 | 0.272433 | 0.542441 | `final_project_best_pipeline_vs_qwen_base_full_program_executor/benchmark_summary.json` |
+| SFT2 | 0.639816 | 0.434783 | 0.578820 | 0.877930 | 同上 |
+| retention-aware RS-SFT | 0.654776 | 0.480978 | 0.603072 | 0.905416 | 同上 |
+| v34r23 GRPO checkpoint-10 | 0.657077 | 0.486413 | 0.606306 | 0.907842 | 同上 |
+| v34r24 Dr.GRPO checkpoint-50 | 0.658228 | 0.486413 | 0.607114 | 0.907033 | `v34r24_drgrpo_ckpt50_full1237_program_executor/benchmark_summary.json` |
 
-统一评估 3 个模型：
-- `base`：基座模型
-- `sft1`：完成 `SFT1` 并 merge 后的模型
-- `sft2`：完成 `SFT1 + SFT2` 并 merge 后的模型
-
-建议统一解码参数：
-- `temperature=0.0`
-- `max_new_tokens=256`
-- `repetition_penalty=1.0`
-
-这样做的目的：
-- 降低采样噪声，方便直接对比 checkpoint
-- 让 benchmark 更像稳定测试，而不是自由生成展示
-
-## 3. 结果判读
-
-建议重点看以下三个差值：
-- `Delta(sft1 - base)`：看 `SFT1` 是否显著提升 `ConvFinQA`
-- `Delta(sft2 - sft1)`：看 `SFT2` 是否显著提升 `fingpt-fineval` 与 `CFLUE`
-- `Delta(sft2 - base)`：看完整两阶段训练的总体收益
-
-同时重点排查：
-- `sft2` 在 `ConvFinQA` 上是否回退
-- `sft2` 在 `fingpt-fineval` 上是否提升但 `CFLUE` 无提升
-
-若出现上述情况，通常意味着：
-- replay 比例偏低
-- `SFT2` 过度贴合考试题分布
-- 指令模板或输出格式在阶段切换中发生漂移
+这些数字必须按阶段解读。Base 到 SFT2 的提升主要来自 program supervision。SFT2 到 RS-SFT 的提升来自 executor-correct rejection sampling 和 retention-aware data mixture。RS-SFT 到 v34r23/v34r24 的提升只有约 4 到 5 题，说明 GRPO 是短程校准模块，而不是全部提升来源。
 
 ## 4. 评测脚本
 
-新增脚本：`evaluation/evaluate_financial_benchmarks.py`
+当前主脚本是 `evaluation/evaluate_financial_benchmarks.py`。它支持模型列表、FinQA/ConvFinQA 数据加载、program 抽取、executor 执行、normalized answer 对比、allowlist 和输出汇总。常见输出包括 `benchmark_manifest.json`、逐模型 predictions、逐模型 summary、`benchmark_summary.json` 和 `benchmark_summary.csv`。
 
-功能：
-- 一次性评估多个模型
-- 支持 `ConvFinQA test`
-- 支持 `fingpt-fineval test`
-- 支持本地 `CFLUE` 小任务集
-- 导出逐条预测与汇总结果
+推荐从仓库根目录运行，远端环境使用 `/root/miniconda3/bin/python -m evaluation.evaluate_financial_benchmarks ...`。历史结果位于 `/root/autodl-tmp/outputs/financial_reasoning_rl/benchmarks/`，README 中的 headline 数字来自两个已经核验的 summary 文件。
 
-输出文件：
-- `benchmark_manifest.json`
-- `{model_name}_predictions.jsonl`
-- `{model_name}_summary.jsonl`
-- `benchmark_summary.json`
-- `benchmark_summary.csv`
+## 5. 评测边界
 
-## 5. 命令示例
+报告模型效果时必须同时写清 evaluator、样本数、解码方式和指标类型。正确写法是 full-1237、temperature-0 greedy、program executor、`executed_answer_accuracy/pass@1_greedy`。不应把 pass@8、rerank 上限、训练 mean reward 或 64-sample gate 分数写成 full benchmark。
 
-```bash
-python -m evaluation.evaluate_financial_benchmarks \
-  --tokenizer_path /root/autodl-tmp/models/qwen/Qwen2___5-7B-Instruct \
-  --model_entry base=/root/autodl-tmp/models/qwen/Qwen2___5-7B-Instruct \
-  --model_entry sft1=/root/autodl-tmp/outputs/financial_reasoning/sft1_merged \
-  --model_entry sft2=/root/autodl-tmp/outputs/financial_reasoning/sft2_merged \
-  --convfinqa_test_file /root/autodl-tmp/data/financial_reasoning/raw/convfinqa_turn/test_turn.json \
-  --fineval_dataset_name FinGPT/fingpt-fineval \
-  --fineval_split test \
-  --cflue_task_file application=/root/autodl-tmp/data/financial_reasoning/raw/cflue/application.json \
-  --cflue_task_file test=/root/autodl-tmp/data/financial_reasoning/raw/cflue/test.json \
-  --output_dir /root/autodl-tmp/outputs/financial_reasoning/benchmarks/sft2_compare
-```
+小样本 joint-64 gate 只用于控制评测成本和筛 checkpoint。它可以判断一个 checkpoint 是否值得推 full evaluation，但不能替代 full-1237 结论。v34r24 中 checkpoint-50 的 joint-64 为 0.593750，checkpoint-100 为 0.585938，因此 checkpoint-50 被选入 full evaluation；最终 headline 仍然以 751/1237 的 full score 为准。
 
-## 6. notebook 集成方式
+## 6. 面试回答
 
-`run_fingpt_min.ipynb` 已补充 benchmark 配置与执行单元。
-
-执行顺序：
-1. 跑完 `SFT-2`
-2. merge `SFT-2 LoRA`
-3. 执行 benchmark 单元
-4. 自动评估 `base / sft1 / sft2`
-5. 结果保存到 `OUTPUT_ROOT / benchmarks / sft2_compare`
-
-## 7. 注意事项
-
-- `ConvFinQA test` 不要参与任何训练或清洗回流。
-- 若 `fingpt-fiqa_qa` 已参与 `SFT2`，不要再把它当最终 benchmark。
-- `CFLUE` 建议先用选择题子集，等主流程稳定后再扩展到阅读理解或生成任务。
-- 若显存紧张，可在评估时加 `--load_in_8bit` 或 `--load_in_4bit`。
-- 若只做快速回归测试，可设置：
-  - `--convfinqa_max_samples`
-  - `--fineval_max_samples`
-  - `--cflue_max_samples_per_task`
+面试中可以强调，本项目的评测不是“模型自己说答案对不对”，而是强制模型生成可执行 program，再由外部 executor 计算答案。这样做的好处是可复现、可归因，也能把 parse error、execution error、wrong formula 和 final answer error 拆开分析。面对“GRPO 提升多少”的问题，应回答 GRPO 在 RS-SFT 后只提升约 0.32 到 0.40 个百分点，主提升来自 SFT 和 RS-SFT。
