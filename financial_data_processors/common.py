@@ -11,7 +11,26 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 DATASET_FAMILIES = {"auto", "convfinqa_turn", "finqa", "fineval", "fiqa_qa"}
 
 NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
+PROGRAM_NUMERIC_LITERAL_RE = re.compile(r"^-?(?:\d+(?:,\d{3})*|\d+)(?:\.\d+)?%?$")
 CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$")
+SUPPORTED_PROGRAM_OPS = {
+    "add",
+    "subtract",
+    "multiply",
+    "divide",
+    "exp",
+    "max",
+    "maximum",
+    "table_max",
+    "min",
+    "minimum",
+    "table_min",
+    "sum",
+    "table_sum",
+    "average",
+    "avg",
+    "table_average",
+}
 TEXT_ID_RE = re.compile(r"^text_(\d+)$", re.IGNORECASE)
 TABLE_ID_RE = re.compile(r"^table_(\d+)$", re.IGNORECASE)
 
@@ -361,6 +380,81 @@ def _split_args(text: str) -> List[str]:
     return args
 
 
+def _split_program_args_strict(text: str) -> Tuple[List[str], Optional[str]]:
+    args: List[str] = []
+    depth = 0
+    start = 0
+    for idx, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return [], "unbalanced_parentheses"
+        elif ch == "," and depth == 0:
+            arg = text[start:idx].strip()
+            if not arg:
+                return [], "empty_argument"
+            args.append(arg)
+            start = idx + 1
+    if depth != 0:
+        return [], "unbalanced_parentheses"
+    tail = text[start:].strip()
+    if not tail:
+        return [], "empty_argument"
+    args.append(tail)
+    return args, None
+
+
+def _is_program_numeric_literal(expr: str) -> bool:
+    cleaned = to_text(expr).replace("$", "").replace(",", "").strip()
+    return bool(PROGRAM_NUMERIC_LITERAL_RE.fullmatch(cleaned))
+
+
+def _validate_program_expr(expr: str, *, allow_ref: bool = True) -> List[str]:
+    expr = to_text(expr).strip()
+    if not expr:
+        return ["empty_expression"]
+    if allow_ref and re.fullmatch(r"#\d+", expr):
+        return []
+    if _is_program_numeric_literal(expr):
+        return []
+    match = CALL_RE.match(expr)
+    if not match:
+        return ["unsupported_expression"]
+    op = match.group(1).lower()
+    if op not in SUPPORTED_PROGRAM_OPS:
+        return ["unsupported_operator"]
+    args, error = _split_program_args_strict(match.group(2))
+    if error:
+        return [error]
+    reasons: List[str] = []
+    for arg in args:
+        reasons.extend(_validate_program_expr(arg, allow_ref=allow_ref))
+    return reasons
+
+
+def strict_program_invalid_reasons(program: Any) -> List[str]:
+    program = canonicalize_program_re(program)
+    if not program:
+        return ["missing_program"]
+    if "=" in program or re.search(r"(?<![A-Za-z0-9])_(?![A-Za-z0-9])", program):
+        return ["assignment_or_placeholder"]
+    steps, error = _split_program_args_strict(program)
+    if error:
+        return [error]
+    if len(steps) > 1 and any(_is_program_numeric_literal(step) for step in steps):
+        return ["multi_constant_program"]
+    reasons: List[str] = []
+    for step in steps:
+        reasons.extend(_validate_program_expr(step, allow_ref=True))
+    return sorted(set(reasons))
+
+
+def program_is_strict_valid(program: Any) -> bool:
+    return not strict_program_invalid_reasons(program)
+
+
 def parse_numeric_value(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -376,12 +470,15 @@ def parse_numeric_value(value: Any) -> Optional[float]:
     match = NUM_RE.search(cleaned)
     if not match:
         return None
+    is_percent = match.end() < len(cleaned) and cleaned[match.end()] == "%"
     try:
         number = float(match.group(0).replace(",", ""))
     except ValueError:
         return None
     if is_paren_negative and number > 0:
         number = -number
+    if is_percent:
+        number = number / 100.0
     return number
 
 
@@ -389,9 +486,10 @@ def _eval_program_expr(expr: str) -> float:
     expr = expr.strip()
     if re.fullmatch(r"#\d+", expr):
         raise ValueError(f"Unresolved program reference: {expr}")
-    number = parse_numeric_value(expr)
-    if number is not None and not CALL_RE.match(expr):
-        return number
+    if _is_program_numeric_literal(expr):
+        number = parse_numeric_value(expr)
+        if number is not None:
+            return number
 
     match = CALL_RE.match(expr)
     if not match:
@@ -435,6 +533,9 @@ def _replace_program_refs(expr: str, step_values: List[float]) -> str:
 def execute_program(program: str) -> Tuple[Optional[float], str | None]:
     if not program:
         return None, "missing_program_re"
+    invalid_reasons = strict_program_invalid_reasons(program)
+    if invalid_reasons:
+        return None, "program_strict_validation_error:" + ",".join(invalid_reasons)
     try:
         steps = _split_args(program)
         if not steps:
