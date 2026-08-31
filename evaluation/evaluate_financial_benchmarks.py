@@ -46,11 +46,19 @@ PROGRAM_STOP_RE = re.compile(
     r"(?im)^\s*(?:Answer|Normalized Answer|Final Answer|Explanation|The final numeric answer)\s*[:：]?.*$"
 )
 PROGRAM_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=\s*(.+)$", re.DOTALL)
-NUMERIC_OUTPUT_FORMATS = ["program_executor", "cot_program", "reasoning_program_executor"]
+NUMERIC_OUTPUT_FORMATS = [
+    "program_executor",
+    "cot_program",
+    "reasoning_program_executor",
+    "answer_first_reasoning_program",
+    "program_first_answer",
+]
 NUMERIC_STRUCTURED_ANCHORS = {
     "program_executor": ["Evidence:", "Program:"],
     "cot_program": ["Reasoning:", "Evidence:", "Program:"],
-    "reasoning_program_executor": ["Reasoning:", "Evidence:", "Program:"],
+    "reasoning_program_executor": ["Evidence:", "Program:"],
+    "answer_first_reasoning_program": ["Reasoning:", "Evidence:", "Program:", "Answer:"],
+    "program_first_answer": ["Evidence:", "Program:", "Answer:"],
 }
 MCQ_STRUCTURED_ANCHORS = ["题目理解：", "推理：", "最终答案："]
 
@@ -100,12 +108,51 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample_temperature", type=float, default=0.7)
     parser.add_argument("--sample_top_p", type=float, default=0.95)
     parser.add_argument("--sample_seed", type=int, default=42)
+    parser.add_argument(
+        "--only_model",
+        action="append",
+        default=[],
+        help="Run only the named model(s). Repeat for multiple names. Existing model entries are filtered.",
+    )
+    parser.add_argument(
+        "--skip_existing_predictions",
+        action="store_true",
+        help="If a model predictions JSONL already exists in output_dir, reuse it and recompute summaries.",
+    )
+    parser.add_argument(
+        "--score_only_predictions",
+        action="store_true",
+        help="Do not load models. Re-score existing *_predictions.jsonl files in output_dir and rebuild summaries.",
+    )
+    parser.add_argument(
+        "--allow_scoring_config_mismatch",
+        action="store_true",
+        help="Allow re-scoring existing predictions even when their stored scoring_config differs from current CLI args.",
+    )
+    parser.add_argument(
+        "--stratified_max_per_bucket",
+        type=int,
+        default=0,
+        help="Limit numeric examples to at most N per source/question/history bucket. 0 disables stratified selection.",
+    )
+    parser.add_argument(
+        "--relaxed_executor_canonicalization",
+        type=lambda value: str(value).lower() in {"1", "true", "yes", "y", "on"},
+        default=False,
+        help="Allow recoverable numeric infix and direct numeric programs to execute for v46-style evaluation.",
+    )
     parser.add_argument("--load_in_8bit", action="store_true")
     parser.add_argument("--load_in_4bit", action="store_true")
     parser.add_argument("--convfinqa_test_file", type=str, default="")
     parser.add_argument("--convfinqa_max_samples", type=int, default=0)
     parser.add_argument("--finqa_test_file", type=str, default="")
     parser.add_argument("--finqa_max_samples", type=int, default=0)
+    parser.add_argument(
+        "--record_id_allowlist_jsonl",
+        type=str,
+        default="",
+        help="Optional JSONL/TXT file containing record_id values to keep after benchmark examples are built.",
+    )
     parser.add_argument("--fineval_dataset_name", type=str, default="FinGPT/fingpt-fineval")
     parser.add_argument("--fineval_split", type=str, default="test")
     parser.add_argument("--fineval_local_file", type=str, default="")
@@ -176,6 +223,86 @@ def parse_name_path_entries(entries: Sequence[str]) -> Dict[str, str]:
             raise ValueError(f"Invalid name=path entry: {entry}")
         parsed[name] = path
     return parsed
+
+
+def filter_model_entries(
+    model_paths: Dict[str, str],
+    adapter_paths: Dict[str, str],
+    only_models: Sequence[str],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    requested = [name.strip() for name in only_models if name.strip()]
+    if not requested:
+        return model_paths, adapter_paths
+    missing = [name for name in requested if name not in model_paths]
+    if missing:
+        raise ValueError(f"Requested --only_model entries are not defined by --model_entry: {missing}")
+    filtered_models = {name: model_paths[name] for name in requested}
+    filtered_adapters = {name: adapter_paths[name] for name in requested if name in adapter_paths}
+    return filtered_models, filtered_adapters
+
+
+
+def load_record_id_allowlist(path: str) -> Optional[set[str]]:
+    if not path:
+        return None
+    allowlist_path = Path(path)
+    allowed: set[str] = set()
+    with allowlist_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            record_id = ""
+            if text.startswith("{"):
+                row = json.loads(text)
+                value = row.get("record_id") or row.get("id")
+                record_id = to_text(value)
+            else:
+                record_id = text
+            if record_id:
+                allowed.add(record_id)
+    if not allowed:
+        raise ValueError(f"No record_id values loaded from allowlist: {path}")
+    return allowed
+
+
+def filter_examples_by_record_id_allowlist(
+    examples: Sequence[BenchmarkExample],
+    allowed_record_ids: Optional[set[str]],
+) -> List[BenchmarkExample]:
+    if allowed_record_ids is None:
+        return list(examples)
+    return [example for example in examples if example.record_id in allowed_record_ids]
+
+def scoring_config_from_args(args: argparse.Namespace, pass_k_values: Sequence[int]) -> Dict[str, Any]:
+    return {
+        "numeric_output_format": get_numeric_output_format(args),
+        "processor_sft_variant": to_text(getattr(args, "processor_sft_variant", "")),
+        "numeric_abs_tol": float(getattr(args, "numeric_abs_tol", 1e-4)),
+        "numeric_rel_tol": float(getattr(args, "numeric_rel_tol", 1e-4)),
+        "pass_k": [int(value) for value in pass_k_values],
+        "num_samples_per_example": int(getattr(args, "num_samples_per_example", 0) or 0),
+    }
+
+
+def validate_prediction_scoring_config(
+    rows: Sequence[Dict[str, Any]],
+    args: argparse.Namespace,
+    pass_k_values: Sequence[int],
+) -> None:
+    if getattr(args, "allow_scoring_config_mismatch", False):
+        return
+    expected = scoring_config_from_args(args, pass_k_values)
+    for row in rows:
+        stored = row.get("scoring_config")
+        if stored is None:
+            continue
+        if stored != expected:
+            raise ValueError(
+                "scoring_config mismatch for existing predictions; "
+                f"expected={expected}, found={stored}. "
+                "Use --allow_scoring_config_mismatch to intentionally re-score with different settings."
+            )
 
 
 def to_text(value: Any) -> str:
@@ -326,10 +453,40 @@ def get_numeric_output_format(args: Any) -> str:
 
 
 def numeric_eval_instruction(output_format: str) -> str:
+    if output_format == "program_first_answer":
+        return (
+            "Output format:\n"
+            "Reasoning: ... (optional, keep it brief)\n\n"
+            "Evidence:\n"
+            "- ...\n\n"
+            "Program: ...\n\n"
+            "Answer: ...\n\n"
+            "Program rule:\n"
+            "- Program is primary and must be one executable numeric DSL expression when possible.\n"
+            "- Use numeric literals or DSL expressions: add, subtract, multiply, divide, max, min, sum, average.\n\n"
+            "Answer rule:\n"
+            "- Put the final normalized numeric answer after Answer:.\n"
+            "- The final numeric answer must match executing Program.\n"
+            "- Use raw ratios such as 0.02899 unless the question explicitly asks for a percent."
+        )
+    if output_format == "answer_first_reasoning_program":
+        return (
+            "Output format:\n"
+            "Reasoning: ... (brief financial reasoning is allowed)\n\n"
+            "Evidence:\n"
+            "- ...\n\n"
+            "Program: ...\n\n"
+            "Answer: ...\n\n"
+            "Answer rule:\n"
+            "- Put the final normalized numeric answer after Answer:.\n"
+            "- Use raw ratios such as 0.02899 unless the question explicitly asks for a percent.\n\n"
+            "Program rule:\n"
+            "- Program is auxiliary but should be an executable numeric DSL expression when possible, using add, subtract, multiply, divide, max, min, sum, average."
+        )
     if output_format in {"cot_program", "reasoning_program_executor"}:
         return (
             "Output format:\n"
-            "Reasoning: ...\n\n"
+            "Reasoning: ... (optional, keep it brief)\n\n"
             "Evidence:\n"
             "- ...\n\n"
             "Program: ...\n\n"
@@ -522,6 +679,47 @@ def load_cflue_examples(task_files: Dict[str, str], max_samples_per_task: int) -
     return examples
 
 
+def infer_eval_question_type(example: BenchmarkExample) -> str:
+    metadata = example.metadata or {}
+    question_type = to_text(metadata.get("question_type"))
+    if question_type:
+        return question_type
+    prompt = to_text(example.prompt).lower()
+    ops = set(program_ops_for_metric(example.gold_program))
+    if not ops:
+        return "direct_lookup"
+    if any(token in prompt for token in ("percent", "percentage", "ratio", "margin", "rate", "portion", "share of")):
+        return "ratio_or_percent"
+    if any(token in prompt for token in ("difference", "change", "increase", "decrease", "more", "less")) or "subtract" in ops:
+        return "change_or_difference"
+    if ops.intersection({"sum", "average", "max", "min", "table_sum", "table_average", "table_max", "table_min"}):
+        return "aggregate"
+    return "calculation"
+
+
+def stratified_bucket_key(example: BenchmarkExample) -> Tuple[str, str, str]:
+    metadata = example.metadata or {}
+    source = benchmark_bucket(example.task_name)
+    question_type = infer_eval_question_type(example)
+    requires_history = "history" if bool(metadata.get("requires_history")) else "no_history"
+    return source, question_type, requires_history
+
+
+def select_stratified_examples(examples: Sequence[BenchmarkExample], max_per_bucket: int) -> List[BenchmarkExample]:
+    if max_per_bucket <= 0:
+        return list(examples)
+    bucket_counts: Dict[Tuple[str, str, str], int] = {}
+    selected: List[BenchmarkExample] = []
+    for example in examples:
+        key = stratified_bucket_key(example)
+        count = bucket_counts.get(key, 0)
+        if count >= max_per_bucket:
+            continue
+        selected.append(example)
+        bucket_counts[key] = count + 1
+    return selected
+
+
 def safe_apply_chat_template(tokenizer: AutoTokenizer, messages: List[Dict[str, str]]) -> str:
     if hasattr(tokenizer, "apply_chat_template"):
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -662,12 +860,151 @@ def extract_program_section(text: str) -> str:
     return clean_prediction_program_text(match.group(1))
 
 
+def extract_evidence_section(text: str) -> str:
+    text = text or ""
+    if "Evidence:" not in text:
+        return ""
+    start = text.find("Evidence:") + len("Evidence:")
+    end = text.find("Program:", start)
+    return text[start:end if end >= 0 else len(text)].strip()
+
+
+def evidence_bullet_count(evidence: str) -> int:
+    lines = [line.strip() for line in (evidence or "").splitlines() if line.strip()]
+    bullet_lines = [line for line in lines if line.startswith("-") or re.match(r"^\d+[\.)]\s+", line)]
+    return len(bullet_lines) if bullet_lines else (1 if (evidence or "").strip() else 0)
+
+
+def has_post_program_text(text: str) -> bool:
+    text = text or ""
+    if "Program:" not in text:
+        return False
+    tail = text[text.rfind("Program:") + len("Program:"):].strip()
+    if not tail:
+        return False
+    lines = [line.strip() for line in tail.splitlines() if line.strip()]
+    return len(lines) > 1
+
+
+def strict_program_contract_rate(prediction: str, evidence: str, program_section: str) -> float:
+    if evidence_bullet_count(evidence) > 2:
+        return 0.0
+    if len((evidence or "").strip()) > 180:
+        return 0.0
+    if len([line for line in (program_section or "").splitlines() if line.strip()]) != 1:
+        return 0.0
+    if has_post_program_text(prediction):
+        return 0.0
+    return 1.0
+
+
 def normalize_program(text: str) -> str:
     return re.sub(r"\s+", "", clean_prediction_program_text(text).lower())
 
 
-def execute_prediction_program(program_text: str) -> Tuple[Optional[float], str, str]:
-    program_canonical = canonicalize_program_re(clean_prediction_program_text(program_text))
+def program_ops_for_metric(program: str) -> List[str]:
+    return [op.lower() for op in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", to_text(program))]
+
+
+def numeric_args_for_metric(text: str) -> List[str]:
+    return [match.rstrip("%").replace(",", "") for match in NUMBER_RE.findall(to_text(text))]
+
+
+def multiset_f1_for_metric(pred_items: List[str], gold_items: List[str]) -> float:
+    if not pred_items or not gold_items:
+        return 0.0
+    pred_counts: Dict[str, int] = {}
+    gold_counts: Dict[str, int] = {}
+    for item in pred_items:
+        pred_counts[item] = pred_counts.get(item, 0) + 1
+    for item in gold_items:
+        gold_counts[item] = gold_counts.get(item, 0) + 1
+    overlap = sum(min(pred_counts.get(item, 0), gold_counts.get(item, 0)) for item in set(pred_counts) | set(gold_counts))
+    precision = overlap / max(len(pred_items), 1)
+    recall = overlap / max(len(gold_items), 1)
+    return 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+
+
+def scale_consistency_metric(executed_value: Any, gold_answer: str, args: argparse.Namespace) -> float:
+    pred_num = parse_number(str(executed_value))
+    gold_num = parse_number(gold_answer)
+    if pred_num is None or gold_num is None or gold_num == 0:
+        return 1.0
+    if math.isclose(pred_num, gold_num, abs_tol=args.numeric_abs_tol, rel_tol=args.numeric_rel_tol):
+        return 1.0
+    if math.isclose(pred_num, gold_num * 100.0, rel_tol=1e-3, abs_tol=1e-3):
+        return 0.0
+    if math.isclose(pred_num * 100.0, gold_num, rel_tol=1e-3, abs_tol=1e-3):
+        return 0.0
+    return 1.0
+
+
+def evidence_grounding_metric(evidence: str, program_section: str) -> float:
+    pred_nums = sorted(set(numeric_args_for_metric(program_section)))
+    if not pred_nums:
+        return 1.0
+    evidence_nums = set(numeric_args_for_metric(evidence))
+    if not evidence_nums:
+        return 0.0
+    return sum(1 for num in pred_nums if num in evidence_nums) / max(len(pred_nums), 1)
+
+
+def history_grounding_metric(example: BenchmarkExample, evidence: str) -> Any:
+    requires_history = bool((example.metadata or {}).get("requires_history"))
+    if not (example.task_name.startswith("convfinqa") and requires_history):
+        return ""
+    evidence_text = to_text(evidence).lower()
+    prompt = example.prompt.lower()
+    years = set(re.findall(r"\b(?:19|20)\d{2}\b", prompt))
+    if years and any(year in evidence_text for year in years):
+        return 1.0
+    cues = ("previous", "prior", "same", "that year", "this value", "previous one", "earlier", "follow-up")
+    return 1.0 if any(cue in evidence_text for cue in cues) else 0.0
+
+
+RELAXED_INFIX_RE = re.compile(
+    r"^\s*(" + NUMBER_RE.pattern + r")\s*([+\-*/])\s*(" + NUMBER_RE.pattern + r")\s*$"
+)
+RELAXED_OPERATOR_MAP = {
+    "+": "add",
+    "-": "subtract",
+    "*": "multiply",
+    "/": "divide",
+}
+
+
+def _normalize_program_number(token: str) -> str:
+    return token.rstrip("%").replace(",", "") + ("%" if token.endswith("%") else "")
+
+
+def relaxed_canonicalize_program(program_text: str) -> str:
+    raw = to_text(program_text)
+    if re.match(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=", raw):
+        return canonicalize_program_re(raw)
+    program = clean_prediction_program_text(raw)
+    if not program:
+        return ""
+    if re.match(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=", program):
+        return canonicalize_program_re(program)
+    if re.fullmatch(NUMBER_RE.pattern, program.replace("，", ",")):
+        return _normalize_program_number(program.replace("，", ","))
+    match = RELAXED_INFIX_RE.fullmatch(program.replace("，", ","))
+    if match:
+        left, operator, right = match.groups()
+        op_name = RELAXED_OPERATOR_MAP[operator]
+        return f"{op_name}({_normalize_program_number(left)}, {_normalize_program_number(right)})"
+    return canonicalize_program_re(program)
+
+
+def execute_prediction_program(
+    program_text: str,
+    relaxed_canonicalization: bool = False,
+) -> Tuple[Optional[float], str, str]:
+    program_canonical = (
+        relaxed_canonicalize_program(program_text)
+        if relaxed_canonicalization
+        else canonicalize_program_re(clean_prediction_program_text(program_text))
+    )
     if not program_canonical:
         return None, "", "missing_program"
     value, error = execute_program(program_canonical)
@@ -702,10 +1039,16 @@ def normalize_answer_text(text: str) -> str:
 def score_example(example: BenchmarkExample, prediction: str, args: argparse.Namespace) -> Dict[str, Any]:
     numeric_output_format = get_numeric_output_format(args)
     normalized_answer = extract_normalized_answer(prediction)
-    answer = extract_display_answer(prediction) or extract_section(extract_answer_body(prediction), FINAL_ANSWER_RE) or extract_answer_body(prediction).strip().split("\n")[0].strip()
+    display_answer = extract_display_answer(prediction)
+    answer = display_answer or extract_section(extract_answer_body(prediction), FINAL_ANSWER_RE) or extract_answer_body(prediction).strip().split("\n")[0].strip()
+    explicit_model_answer = normalized_answer or display_answer
     reasoning = extract_section(prediction, REASONING_RE)
+    evidence = extract_evidence_section(prediction)
     program_section = extract_program_section(prediction)
-    executed_value, executed_program_canonical, program_error = execute_prediction_program(program_section)
+    executed_value, executed_program_canonical, program_error = execute_prediction_program(
+        program_section,
+        relaxed_canonicalization=bool(getattr(args, "relaxed_executor_canonicalization", False)),
+    )
     gold_num = parse_number(example.gold_answer)
     model_pred_num = parse_number(prediction)
     model_answer_correct = None
@@ -741,6 +1084,11 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         "normalized_answer_coverage": float(bool(normalized_answer)),
         "final_answer_coverage": float(bool(answer)),
         "reasoning_coverage": float(bool(reasoning)),
+        "evidence_bullet_count": evidence_bullet_count(evidence),
+        "evidence_over_two_bullets_rate": float(evidence_bullet_count(evidence) > 2),
+        "evidence_chars": len((evidence or "").strip()),
+        "post_program_text_rate": float(has_post_program_text(prediction)),
+        "strict_program_contract_rate": strict_program_contract_rate(prediction, evidence, program_section),
         "program_section_coverage": float(bool(program_section)),
         "structured_response_coverage": float(all(anchor in (prediction or "") for anchor in structured_anchors)),
         "prediction_chars": len((prediction or "").strip()),
@@ -754,16 +1102,46 @@ def score_example(example: BenchmarkExample, prediction: str, args: argparse.Nam
         "executed_program": executed_program_canonical,
         "executed_program_answer": format_numeric_answer(executed_value) if executed_value is not None else "",
         "program_execution_error": program_error,
+        "operation_match_rate": "",
+        "argument_grounding_rate": "",
+        "scale_consistency_rate": "",
+        "evidence_grounding_rate": "",
+        "history_grounding_rate": history_grounding_metric(example, evidence),
     }
     if example.answer_type == "numeric":
+        operation_match = ""
+        argument_grounding = ""
+        if example.gold_program:
+            operation_match = multiset_f1_for_metric(
+                program_ops_for_metric(program_section),
+                program_ops_for_metric(example.gold_program),
+            )
+            argument_grounding = multiset_f1_for_metric(
+                numeric_args_for_metric(program_section),
+                numeric_args_for_metric(example.gold_program),
+            )
         result["numeric_parse_rate"] = float(model_pred_num is not None)
         result["program_parse_rate"] = float(bool(program_section))
         result["program_execution_rate"] = float(executed_value is not None)
         result["executed_answer_accuracy"] = float(executed_answer_correct or 0.0)
         result["model_normalized_answer_accuracy"] = float(model_answer_correct or 0.0) if model_answer_correct is not None else 0.0
         result["program_answer_consistency"] = program_answer_consistency
+        result["operation_match_rate"] = operation_match
+        result["argument_grounding_rate"] = argument_grounding
+        result["scale_consistency_rate"] = scale_consistency_metric(executed_value, example.gold_answer, args) if executed_value is not None else 0.0
+        result["evidence_grounding_rate"] = evidence_grounding_metric(evidence, program_section)
+        program_primary_format = numeric_output_format in {
+            "program_executor",
+            "cot_program",
+            "reasoning_program_executor",
+            "program_first_answer",
+        }
         if gold_num is None:
             result["answer_correct"] = float(normalize_answer_text(prediction) == normalize_answer_text(example.gold_answer))
+        elif program_primary_format:
+            result["answer_correct"] = result["executed_answer_accuracy"]
+        elif explicit_model_answer and model_answer_correct is not None:
+            result["answer_correct"] = result["model_normalized_answer_accuracy"]
         else:
             result["answer_correct"] = result["executed_answer_accuracy"]
         if example.gold_program:
@@ -797,6 +1175,15 @@ def _mean(values: List[float]) -> Any:
     if not values:
         return ""
     return round(sum(values) / len(values), 6)
+
+
+def _numeric_score_values(scores: List[Dict[str, Any]], key: str) -> List[float]:
+    values = []
+    for score in scores:
+        value = score.get(key, "")
+        if isinstance(value, (int, float)):
+            values.append(float(value))
+    return values
 
 
 def compute_pass_metrics(
@@ -842,10 +1229,20 @@ def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, A
     normalized_answer_scores = [item.get("normalized_answer_coverage", 0.0) for item in scores]
     final_answer_scores = [item.get("final_answer_coverage", item.get("answer_coverage", 0.0)) for item in scores]
     reasoning_scores = [item.get("reasoning_coverage", 0.0) for item in scores]
+    evidence_bullet_counts = [item.get("evidence_bullet_count", 0.0) for item in scores]
+    evidence_over_two_scores = [item.get("evidence_over_two_bullets_rate", 0.0) for item in scores]
+    evidence_chars = [item.get("evidence_chars", 0.0) for item in scores]
+    post_program_text_scores = [item.get("post_program_text_rate", 0.0) for item in scores]
+    strict_contract_scores = [item.get("strict_program_contract_rate", 0.0) for item in scores]
     program_section_scores = [item["program_section_coverage"] for item in scores]
     structured_scores = [item["structured_response_coverage"] for item in scores]
     prediction_chars = [item["prediction_chars"] for item in scores]
     numeric_parse_scores = [item["numeric_parse_rate"] for item in scores if item["numeric_parse_rate"] is not None]
+    operation_match_scores = [item.get("operation_match_rate", "") for item in scores if item.get("operation_match_rate", "") != ""]
+    argument_grounding_scores = [item.get("argument_grounding_rate", "") for item in scores if item.get("argument_grounding_rate", "") != ""]
+    scale_consistency_scores = [item.get("scale_consistency_rate", "") for item in scores if item.get("scale_consistency_rate", "") != ""]
+    evidence_grounding_scores = [item.get("evidence_grounding_rate", "") for item in scores if item.get("evidence_grounding_rate", "") != ""]
+    history_grounding_scores = [item.get("history_grounding_rate", "") for item in scores if item.get("history_grounding_rate", "") != ""]
     answer_acc = sum(answer_scores) / len(answer_scores)
     row = {
         "model_name": model_name,
@@ -866,9 +1263,33 @@ def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, A
         "normalized_answer_coverage": _mean(normalized_answer_scores),
         "final_answer_coverage": _mean(final_answer_scores),
         "reasoning_coverage": _mean(reasoning_scores),
+        "avg_evidence_bullet_count": _mean(evidence_bullet_counts),
+        "evidence_over_two_bullets_rate": _mean(evidence_over_two_scores),
+        "avg_evidence_chars": _mean(evidence_chars),
+        "post_program_text_rate": _mean(post_program_text_scores),
+        "strict_program_contract_rate": _mean(strict_contract_scores),
         "program_section_coverage": _mean(program_section_scores),
         "structured_response_coverage": _mean(structured_scores),
         "numeric_parse_rate": _mean(numeric_parse_scores),
+        "operation_match_rate": _mean(operation_match_scores),
+        "argument_grounding_rate": _mean(argument_grounding_scores),
+        "scale_consistency_rate": _mean(scale_consistency_scores),
+        "evidence_grounding_rate": _mean(evidence_grounding_scores),
+        "history_grounding_rate": _mean(history_grounding_scores),
+        "generation_quality_score": _mean(
+            [
+                item
+                for item in (
+                    _mean(program_execution_scores),
+                    _mean(operation_match_scores),
+                    _mean(argument_grounding_scores),
+                    _mean(scale_consistency_scores),
+                    _mean(evidence_grounding_scores),
+                )
+                if item != ""
+            ]
+        ),
+        "selection_quality_score": "",
         "avg_prediction_chars": _mean(prediction_chars),
     }
     pass_keys = sorted(
@@ -877,6 +1298,10 @@ def _build_summary_row(model_name: str, task_name: str, scores: List[Dict[str, A
     )
     for key in pass_keys:
         row[key] = _mean([item[key] for item in scores if item.get(key) != ""])
+    selection_keys = ["pass@1_greedy"] + pass_keys
+    row["selection_quality_score"] = _mean(
+        [item for key in selection_keys for item in [_mean(_numeric_score_values(scores, key))] if item != ""]
+    )
     return row
 
 
@@ -925,8 +1350,10 @@ def build_prediction_row(
     score: Dict[str, Any],
     generation_mode: str,
     candidate_index: int,
+    *,
+    scoring_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    return {
+    row = {
         "model_name": model_name,
         "task_name": example.task_name,
         "record_id": example.record_id,
@@ -951,6 +1378,60 @@ def build_prediction_row(
         "program_string_accuracy": score.get("program_string_accuracy"),
         "metadata": example.metadata,
     }
+    if scoring_config is not None:
+        row["scoring_config"] = dict(scoring_config)
+    return row
+
+
+def example_from_prediction_row(row: Dict[str, Any]) -> BenchmarkExample:
+    return BenchmarkExample(
+        task_name=to_text(row.get("task_name")),
+        prompt=to_text(row.get("prompt")),
+        gold_answer=to_text(row.get("gold_answer")),
+        answer_type="mcq" if to_text(row.get("task_name")).startswith(("fineval", "cflue_")) else "numeric",
+        record_id=to_text(row.get("record_id")),
+        metadata=dict(row.get("metadata") or {}),
+        gold_program=to_text(row.get("gold_program")),
+    )
+
+
+def aggregate_prediction_rows(
+    model_name: str,
+    raw_predictions: Sequence[Dict[str, Any]],
+    args: argparse.Namespace,
+    pass_k_values: Sequence[int],
+) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for row in raw_predictions:
+        if to_text(row.get("model_name")) != model_name:
+            continue
+        key = (to_text(row.get("task_name")), to_text(row.get("record_id")))
+        grouped.setdefault(key, []).append(dict(row))
+    validate_prediction_scoring_config(
+        [row for rows in grouped.values() for row in rows],
+        args,
+        pass_k_values,
+    )
+
+    scores: List[Dict[str, Any]] = []
+    for _, rows in sorted(grouped.items()):
+        rows = sorted(rows, key=lambda item: (to_text(item.get("generation_mode")) != "greedy", int(item.get("candidate_index") or 0)))
+        greedy_row = next((row for row in rows if row.get("generation_mode") == "greedy"), rows[0])
+        example = example_from_prediction_row(greedy_row)
+        greedy_score = score_example(example, to_text(greedy_row.get("prediction")), args)
+        sampled_scores = [
+            score_example(example_from_prediction_row(row), to_text(row.get("prediction")), args)
+            for row in rows
+            if row.get("generation_mode") == "sampled"
+        ]
+        scores.append(build_example_summary_score(greedy_score, sampled_scores, pass_k_values))
+    return aggregate_scores(model_name, scores)
+
+
+def load_existing_predictions(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing predictions file: {path}")
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def score_generation(
@@ -966,6 +1447,7 @@ def score_generation(
     top_p: Optional[float],
     do_sample: bool,
     seed: Optional[int],
+    scoring_config: Optional[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     prediction = generate_response(
         model,
@@ -978,7 +1460,15 @@ def score_generation(
         seed=seed,
     )
     score = score_example(example, prediction, args)
-    row = build_prediction_row(model_name, example, prediction, score, generation_mode, candidate_index)
+    row = build_prediction_row(
+        model_name,
+        example,
+        prediction,
+        score,
+        generation_mode,
+        candidate_index,
+        scoring_config=scoring_config,
+    )
     return score, row
 
 
@@ -1008,11 +1498,13 @@ def main() -> None:
             f"[warn] num_samples_per_example={args.num_samples_per_example} is smaller than max pass@k={max(pass_k_values)}; "
             "metrics will use available candidates only."
         )
+    scoring_config = scoring_config_from_args(args, pass_k_values)
 
     model_paths = parse_name_path_entries(args.model_entry)
     if not model_paths:
         raise ValueError("Please provide at least one --model_entry name=path")
     adapter_paths = parse_name_path_entries(args.adapter_entry)
+    model_paths, adapter_paths = filter_model_entries(model_paths, adapter_paths, args.only_model)
     tokenizer_path = args.tokenizer_path or next(iter(model_paths.values()))
 
     benchmark_examples: List[BenchmarkExample] = []
@@ -1032,6 +1524,14 @@ def main() -> None:
         print("[skip] Fineval disabled (use --run_fineval or set --fineval_local_file to enable).")
     cflue_task_files = parse_name_path_entries(args.cflue_task_file)
     benchmark_examples.extend(load_cflue_examples(cflue_task_files, args.cflue_max_samples_per_task))
+    allowed_record_ids = load_record_id_allowlist(args.record_id_allowlist_jsonl)
+    before_allowlist_count = len(benchmark_examples)
+    benchmark_examples = filter_examples_by_record_id_allowlist(benchmark_examples, allowed_record_ids)
+    if allowed_record_ids is not None:
+        print(
+            f"[allowlist] kept {len(benchmark_examples)}/{before_allowlist_count} examples from {args.record_id_allowlist_jsonl}"
+        )
+    benchmark_examples = select_stratified_examples(benchmark_examples, args.stratified_max_per_bucket)
 
     if not benchmark_examples:
         raise ValueError("No benchmark examples were loaded. Please check your dataset paths and splits.")
@@ -1042,6 +1542,7 @@ def main() -> None:
         "tokenizer_path": tokenizer_path,
         "convfinqa_test_file": args.convfinqa_test_file,
         "finqa_test_file": args.finqa_test_file,
+        "record_id_allowlist_jsonl": args.record_id_allowlist_jsonl,
         "fineval_dataset_name": args.fineval_dataset_name,
         "fineval_split": args.fineval_split,
         "run_fineval": run_fineval,
@@ -1055,13 +1556,37 @@ def main() -> None:
         "sample_seed": args.sample_seed,
         "processor_sft_variant": args.processor_sft_variant,
         "numeric_output_format": args.numeric_output_format,
+        "scoring_config": scoring_config,
         "primary_metric": "executed_answer_accuracy",
     }
     (output_dir / "benchmark_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     all_summary_rows: List[Dict[str, Any]] = []
+    if args.score_only_predictions:
+        for model_name in model_paths:
+            predictions_path = output_dir / f"{model_name}_predictions.jsonl"
+            raw_predictions = load_existing_predictions(predictions_path)
+            summary_rows = aggregate_prediction_rows(model_name, raw_predictions, args, pass_k_values)
+            save_jsonl(output_dir / f"{model_name}_summary.jsonl", summary_rows)
+            all_summary_rows.extend(summary_rows)
+        save_csv(output_dir / "benchmark_summary.csv", all_summary_rows)
+        (output_dir / "benchmark_summary.json").write_text(
+            json.dumps(all_summary_rows, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[done] Re-scored benchmark outputs in: {output_dir}")
+        return
+
     for model_name, model_path in model_paths.items():
         adapter_path = adapter_paths.get(model_name, "")
+        predictions_path = output_dir / f"{model_name}_predictions.jsonl"
+        if args.skip_existing_predictions and predictions_path.exists():
+            print(f"[reuse] model={model_name} predictions={predictions_path}")
+            raw_predictions = load_existing_predictions(predictions_path)
+            summary_rows = aggregate_prediction_rows(model_name, raw_predictions, args, pass_k_values)
+            save_jsonl(output_dir / f"{model_name}_summary.jsonl", summary_rows)
+            all_summary_rows.extend(summary_rows)
+            continue
         print(f"[eval] model={model_name} path={model_path} adapter={adapter_path or 'none'}")
         model, tokenizer = load_model_and_tokenizer(model_path, tokenizer_path, adapter_path, args)
         raw_predictions: List[Dict[str, Any]] = []
@@ -1079,6 +1604,7 @@ def main() -> None:
                 top_p=None,
                 do_sample=False,
                 seed=None,
+                scoring_config=scoring_config,
             )
             raw_predictions.append(greedy_row)
 
@@ -1097,6 +1623,7 @@ def main() -> None:
                     top_p=args.sample_top_p,
                     do_sample=True,
                     seed=sample_seed,
+                    scoring_config=scoring_config,
                 )
                 sampled_scores.append(sampled_score)
                 raw_predictions.append(sampled_row)

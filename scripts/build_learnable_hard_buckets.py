@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
+from transformers import GenerationConfig
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,9 +26,12 @@ from evaluation.evaluate_financial_benchmarks import (
     generate_response,
     load_model_and_tokenizer,
     parse_number,
+    safe_apply_chat_template,
     score_example,
     unload_model,
 )
+from training.finqa_program_grpo import STRICT_PROGRAM_SYSTEM_PROMPT, SYSTEM_PROMPT
+from scripts.v34r23_prompt_processor import prepare_rows_like_grpo, prompt_target_leakage_reason
 
 
 REQUIRED_FIELDS = [
@@ -92,6 +96,17 @@ def filter_rows_by_source(rows: Sequence[Dict[str, Any]], raw_filter: str) -> Li
     if not allowed:
         return list(rows)
     return [row for row in rows if first_text(row.get("source_dataset")) in allowed]
+
+
+def filter_rows_by_manifest_phase(rows: Sequence[Dict[str, Any]], manifest_file: str, manifest_phase: str) -> List[Dict[str, Any]]:
+    if not manifest_file or not manifest_phase or manifest_phase == "all":
+        return list(rows)
+    allowed_keys = {
+        row_key(item)
+        for item in read_jsonl(Path(manifest_file))
+        if first_text(item.get("manifest_phase")) == manifest_phase
+    }
+    return [row for row in rows if row_key(row) in allowed_keys]
 
 
 def read_existing_diagnostics(path: Path) -> List[Dict[str, Any]]:
@@ -190,8 +205,11 @@ def build_mix_rows(
 
 
 def make_generation_args(args: argparse.Namespace) -> SimpleNamespace:
+    system_prompt = args.system_prompt
+    if getattr(args, "use_grpo_prompt_processor", False) and not system_prompt:
+        system_prompt = STRICT_PROGRAM_SYSTEM_PROMPT
     return SimpleNamespace(
-        system_prompt=args.system_prompt,
+        system_prompt=system_prompt,
         max_new_tokens=args.max_new_tokens,
         temperature=0.0,
         repetition_penalty=args.repetition_penalty,
@@ -229,6 +247,51 @@ def generate_and_score(
         seed=seed,
     )
     return prediction, score_prediction(example, prediction, generation_args)
+
+
+@torch.inference_mode()
+def generate_sample_responses(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    generation_args: SimpleNamespace,
+    *,
+    num_return_sequences: int,
+    temperature: float,
+    top_p: Optional[float],
+    seed: int,
+) -> List[str]:
+    messages = []
+    if generation_args.system_prompt:
+        messages.append({"role": "system", "content": generation_args.system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    prompt_text = safe_apply_chat_template(tokenizer, messages)
+    inputs = tokenizer(prompt_text, return_tensors="pt")
+    input_ids = inputs["input_ids"].to(model.device)
+    attention_mask = inputs["attention_mask"].to(model.device)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    generation_config = GenerationConfig(
+        max_new_tokens=generation_args.max_new_tokens,
+        do_sample=True,
+        temperature=temperature,
+        repetition_penalty=generation_args.repetition_penalty,
+        num_return_sequences=num_return_sequences,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    if top_p is not None:
+        generation_config.top_p = top_p
+    outputs = model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        generation_config=generation_config,
+    )
+    return [
+        tokenizer.decode(output[input_ids.shape[1]:], skip_special_tokens=True).strip()
+        for output in outputs
+    ]
 
 
 def compact_score(score: Dict[str, Any]) -> Dict[str, Any]:
@@ -397,6 +460,7 @@ def write_outputs(
     summary["sample_seed"] = args.sample_seed
     summary["easy_replay_ratio"] = args.easy_replay_ratio
     summary["mix_count"] = len(mix_rows)
+    summary["use_grpo_prompt_processor"] = bool(getattr(args, "use_grpo_prompt_processor", False))
     (output_dir / "bucket_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 
@@ -405,8 +469,28 @@ def process_rows(args: argparse.Namespace) -> Dict[str, Any]:
     input_file = Path(args.input_file)
     output_dir = Path(args.output_dir)
     rows = filter_rows_by_source(read_jsonl(input_file), args.source_dataset_filter)
+    rows = filter_rows_by_manifest_phase(
+        rows,
+        getattr(args, "manifest_file", ""),
+        getattr(args, "manifest_phase", ""),
+    )
     if args.max_samples > 0:
         rows = rows[: args.max_samples]
+    if getattr(args, "use_grpo_prompt_processor", False):
+        processed_rows = prepare_rows_like_grpo(rows, is_main_process=True)
+        rewritten_rows = []
+        for raw_row, processed_row in zip(rows, processed_rows):
+            row = dict(raw_row)
+            row["input_prompt_raw"] = first_text(processed_row.get("input_prompt_raw"))
+            row["reward_profile"] = first_text(processed_row.get("reward_profile"))
+            row["source_dataset"] = first_text(processed_row.get("source_dataset"))
+            row["gold_answer"] = first_text(processed_row.get("gold_answer"))
+            row["gold_program"] = first_text(processed_row.get("gold_program"))
+            meta = dict(raw_row.get("metadata") or {})
+            meta.update(processed_row.get("metadata") or {})
+            row["metadata"] = meta
+            rewritten_rows.append(row)
+        rows = [row for row in rewritten_rows if not prompt_target_leakage_reason(row)]
     output_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_path = output_dir / "learnable_hard_diagnostics.jsonl"
     rows_by_key = {row_key(row): row for row in rows}
@@ -424,7 +508,12 @@ def process_rows(args: argparse.Namespace) -> Dict[str, Any]:
         return write_outputs(output_dir, input_file, args, bucket_rows, diagnostics)
 
     generation_args = make_generation_args(args)
-    model, tokenizer = load_model_and_tokenizer(args.model_path, args.tokenizer_path, "", generation_args)
+    model, tokenizer = load_model_and_tokenizer(
+        args.model_path,
+        args.tokenizer_path,
+        args.adapter_path,
+        generation_args,
+    )
 
     try:
         for example_index, row in enumerate(tqdm(rows, desc="Bucketing examples")):
@@ -451,20 +540,37 @@ def process_rows(args: argparse.Namespace) -> Dict[str, Any]:
                     seed=None,
                 )
                 if should_sample_after_greedy(args, greedy_score, noisy):
-                    for candidate_index in range(args.num_samples_per_example):
-                        sample_seed = args.sample_seed + example_index * args.num_samples_per_example + candidate_index
-                        prediction, score = generate_and_score(
+                    if args.batch_sample_generation and args.num_samples_per_example > 1:
+                        sample_seed = args.sample_seed + example_index * args.num_samples_per_example
+                        batch_predictions = generate_sample_responses(
                             model,
                             tokenizer,
-                            example,
+                            example.prompt,
                             generation_args,
+                            num_return_sequences=args.num_samples_per_example,
                             temperature=args.sample_temperature,
                             top_p=args.sample_top_p,
-                            do_sample=True,
                             seed=sample_seed,
                         )
-                        sampled_predictions.append(prediction)
-                        sampled_scores.append(score)
+                        for prediction in batch_predictions:
+                            score = score_prediction(example, prediction, generation_args)
+                            sampled_predictions.append(prediction)
+                            sampled_scores.append(score)
+                    else:
+                        for candidate_index in range(args.num_samples_per_example):
+                            sample_seed = args.sample_seed + example_index * args.num_samples_per_example + candidate_index
+                            prediction, score = generate_and_score(
+                                model,
+                                tokenizer,
+                                example,
+                                generation_args,
+                                temperature=args.sample_temperature,
+                                top_p=args.sample_top_p,
+                                do_sample=True,
+                                seed=sample_seed,
+                            )
+                            sampled_predictions.append(prediction)
+                            sampled_scores.append(score)
                 else:
                     skipped_sampling = True
 
@@ -505,7 +611,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input_file", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--model_path", required=True)
+    parser.add_argument("--adapter_path", default="")
     parser.add_argument("--tokenizer_path", required=True)
+    parser.add_argument("--manifest_file", default="")
+    parser.add_argument("--manifest_phase", choices=["", "pilot", "extension", "all"], default="")
     parser.add_argument("--max_samples", type=int, default=0)
     parser.add_argument("--source_dataset_filter", type=str, default="")
     parser.add_argument("--skip_sampling_if_greedy_correct", action="store_true")
@@ -515,6 +624,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample_temperature", type=float, default=0.7)
     parser.add_argument("--sample_top_p", type=float, default=0.95)
     parser.add_argument("--sample_seed", type=int, default=42)
+    parser.add_argument("--batch_sample_generation", action="store_true")
     parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--repetition_penalty", type=float, default=1.0)
     parser.add_argument("--system_prompt", type=str, default="")
@@ -525,6 +635,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--load_in_8bit", action="store_true")
     parser.add_argument("--easy_replay_ratio", type=float, default=0.2)
     parser.add_argument("--invalid_executable_threshold", type=float, default=0.5)
+    parser.add_argument("--use_grpo_prompt_processor", action="store_true")
     args = parser.parse_args()
     if args.num_samples_per_example < 0:
         raise ValueError("--num_samples_per_example must be non-negative")
